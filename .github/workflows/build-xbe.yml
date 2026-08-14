@@ -14,21 +14,54 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
-    # The toolchain image the nxdk project publishes. Building nxdk from source in the job works too but
-    # takes several minutes every time and pins nothing; this is the same toolchain for every build.
-    container:
-      image: ghcr.io/xboxdev/nxdk:latest
-
     steps:
+      # nxdk is built from source rather than pulled as an image.
+      #
+      # The first attempt ran the whole job inside a container guessed at from the project's name, and
+      # the checkout failed before anything else ran: 'actions/checkout' needs git inside the container
+      # to do a real clone, and a minimal build image has no reason to carry it. Building from source is
+      # what nxdk actually documents, it needs nothing that cannot be checked here, and the result is
+      # cached so it only costs the first run after nxdk changes.
+      - name: Install the toolchain nxdk needs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang lld llvm bison flex cmake make git ca-certificates
+
       - name: Check out
         uses: actions/checkout@v4
+        # No submodules: this repository has none. No history depth either - the build id is passed in
+        # below, so there is nothing here that needs to look back past the current commit.
+
+      - name: Check out nxdk
+        uses: actions/checkout@v4
         with:
+          repository: XboxDev/nxdk
+          path: nxdk
           submodules: recursive
-          fetch-depth: 0      # So 'git describe' can find the tag to stamp into the binary
+          fetch-depth: 0
+
+      - name: Which nxdk is this
+        id: nxdk
+        run: echo "sha=$(git -C nxdk rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      # Keyed on the nxdk commit, so a new nxdk rebuilds it and nothing else does
+      - name: Reuse a previous nxdk build
+        id: nxdk-cache
+        uses: actions/cache@v4
+        with:
+          path: nxdk
+          key: nxdk-${{ runner.os }}-${{ steps.nxdk.outputs.sha }}
+
+      - name: Build nxdk
+        if: steps.nxdk-cache.outputs.cache-hit != 'true'
+        run: make -C nxdk NXDK_ONLY=y -j "$(nproc)"
+
+      - name: Check nxdk produced its toolchain file
+        run: test -f nxdk/share/toolchain-nxdk.cmake
 
       - name: Work out the build id
         id: buildid
-        shell: bash
         run: |
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
             echo "id=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
@@ -37,7 +70,6 @@ jobs:
           fi
 
       - name: Configure
-        shell: bash
         run: |
           # Optimisation is set explicitly: the nxdk toolchain leaves CMAKE_CXX_FLAGS_RELEASE empty, so
           # asking for a Release build alone does not guarantee a -O flag actually reaches the compiler.
@@ -45,20 +77,22 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_FLAGS_RELEASE="-O2 -DNDEBUG" \
             -DCMAKE_CXX_FLAGS_RELEASE="-O2 -DNDEBUG" \
-            -DCMAKE_TOOLCHAIN_FILE="${NXDK_DIR}/share/toolchain-nxdk.cmake" \
+            -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/nxdk/share/toolchain-nxdk.cmake" \
             -DPSYDOOM_XBOX_BUILD_ID="${{ steps.buildid.outputs.id }}" \
             -DPSYDOOM_INCLUDE_VULKAN_RENDERER=OFF \
             -DPSYDOOM_INCLUDE_LAUNCHER=OFF \
             -DPSYDOOM_INCLUDE_AUDIO_TOOLS=OFF \
             -DPSYDOOM_INCLUDE_OTHER_TOOLS=OFF \
             -DPSYDOOM_INCLUDE_OLD_CODE=OFF
+        env:
+          NXDK_DIR: ${{ github.workspace }}/nxdk
 
       - name: Build
-        shell: bash
         run: cmake --build build-xbox --target PsyDoom -j "$(nproc)"
+        env:
+          NXDK_DIR: ${{ github.workspace }}/nxdk
 
       - name: Check the executable was produced
-        shell: bash
         run: |
           # A build that succeeds without producing an XBE has failed at something the exit code did not
           # report, and an empty release asset is worse than a failed job.
