@@ -1,0 +1,1323 @@
+#include "d_main.h"
+
+#include "Base/d_vsprintf.h"
+#include "Base/i_drawcmds.h"
+#include "Base/i_file.h"
+#include "Base/i_main.h"
+#include "Base/i_misc.h"
+#include "Base/s_sound.h"
+#include "Base/w_wad.h"
+#include "Base/z_zone.h"
+#include "cdmaptbl.h"
+#include "FatalErrors.h"
+#include "FileUtils.h"
+#include "Finally.h"
+#include "Game/g_game.h"
+
+#if defined(__XBOX__)
+    extern void xbLog(const char* msg) noexcept;
+    #define DMAIN_STEP(msg) xbLog(msg)
+#else
+    #define DMAIN_STEP(msg) ((void)0)
+#endif
+#include "Game/p_info.h"
+#include "Game/p_spec.h"
+#include "Game/p_switch.h"
+#include "Game/p_tick.h"
+#include "Game/sprinfo.h"
+#include "PsyDoom/Config/Config.h"
+#include "PsyDoom/DemoPlayer.h"
+#include "PsyDoom/DemoRecorder.h"
+#include "PsyDoom/Game.h"
+#include "PsyDoom/PlayerColour.h"
+#include "PsyDoom/Splitscreen.h"
+#include "PsyDoom/SsgStyle.h"
+#include "PsyDoom/XboxLog.h"
+#include "PsyDoom/Controls.h"
+#include "PsyDoom/GameConstants.h"
+#include "PsyDoom/Input.h"
+#include "PsyDoom/IntroLogos.h"
+#include "PsyDoom/MapInfo/MapInfo.h"
+#include "PsyDoom/Movie/MoviePlayer.h"
+#include "PsyDoom/PlayerPrefs.h"
+#include "PsyDoom/ProgArgs.h"
+#include "PsyDoom/PsxPadButtons.h"
+#include "PsyDoom/PsxVm.h"
+#include "PsyDoom/Utils.h"
+#include "PsyDoom/Video.h"
+#include "PsyQ/LIBGPU.h"
+#include "Renderer/r_data.h"
+#include "Renderer/r_main.h"
+#include "UI/cr_main.h"
+#include "UI/in_main.h"
+#include "UI/le_main.h"
+#include "UI/m_main.h"
+#include "UI/o_main.h"
+#include "UI/st_main.h"
+#include "UI/ti_main.h"
+
+#if PSYDOOM_VULKAN_RENDERER
+    #include "PsyDoom/Vulkan/VRenderer.h"
+#endif
+
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <memory>
+
+#if PSYDOOM_MODS
+    // PsyDoom: how frequently (in seconds) to update the performance counters that track the average frame time
+    static constexpr float PERF_COUNTER_FREQ = 0.25f;
+#endif
+
+// The current number of 1 vblank ticks
+int32_t gTicCon;
+
+// The number of elapsed vblanks for all players
+int32_t gPlayersElapsedVBlanks[MAXPLAYERS];
+
+#if defined(__XBOX__)
+    // How many pause edges player two's gather has produced, against how many the tick loop acted on
+    uint32_t gXbP2PauseEdges = 0;
+
+    // Player two pressed pause and no tick has taken it yet.
+    //
+    // The gather runs every frame and the loop that acts on pause runs every tick, and at around 20fps against 30Hz
+    // most frames are not ticks. 'fTogglePause' only lives for one frame, so a press landing on a non tick frame was
+    // overwritten by the next gather before anything could read it - measured as five presses produced at the gather
+    // and one acted on. Holding it until a tick consumes it makes every press count.
+    bool gbXbP2PauseLatched = false;
+
+    // Same again for player two opening the options menu with select, which is dropped the same way
+    bool gbXbP2MenuBackLatched = false;
+#endif
+
+// PsyDoom: networking - what amount of elapsed vblanks we told the other player we will simulate next
+#if PSYDOOM_MODS
+    int32_t gNextPlayerElapsedVBlanks;
+#endif
+
+// Pointer to a buffer holding the demo and the current pointer within the buffer for playback/recording
+std::byte*  gpDemoBuffer;
+std::byte*  gpDemo_p;
+
+#if PSYDOOM_MODS
+    // PsyDoom: info about the current built-in demo being played (what game mode to use etc.)
+    BuiltInDemoDef gCurBuiltInDemo;
+#endif
+
+// Game start parameters
+skill_t     gStartSkill         = sk_medium;
+int32_t     gStartMapOrEpisode  = 1;
+gametype_t  gStartGameType      = gt_single;
+
+// Net games: set if a network game being started was aborted
+bool gbDidAbortGame = false;
+
+#if PSYDOOM_MODS
+    bool        gbStartupWarpToMap = false;     // PsyDoom: warp straight to a map and bypass menus on starting a new game? (map development tool)
+    double      gPrevFrameDuration;             // How long the previous frame took: used to try and provide more accurate interpolation
+    float       gPerfAvgFps;                    // Performance counter: averaged FPS for the last few frames
+    float       gPerfAvgUsec;                   // Performance counter: averaged microseconds duration for the last few frames
+    bool        gbIsFirstTick;                  // Set to 'true' for the very first tick only, 'false' thereafter
+    bool        gbKeepInputEvents;              // Ticker request: if true then don't consume input events after invoking the current ticker in 'MiniLoop'
+    std::byte*  gpDemoBufferEnd;                // PsyDoom: save the end pointer for the buffer, so we know when to end the demo; do this instead of hardcoding the end
+    bool        gbDoInPlaceLevelReload;         // PsyDoom developer feature: reload the map but preserve player position and orientation? Allows for fast preview of changes.
+    fixed_t     gInPlaceReloadPlayerX;          // Where to position the player after doing the 'in place' level reload (x)
+    fixed_t     gInPlaceReloadPlayerY;          // Where to position the player after doing the 'in place' level reload (y)
+    fixed_t     gInPlaceReloadPlayerZ;          // Where to position the player after doing the 'in place' level reload (z)
+    angle_t     gInPlaceReloadPlayerAng;        // Angle of the player when doing an 'in place' level releoad
+
+    // When using PAL timings and NOT using demo timings this tells how many vblanks the current game/world tick will last for.
+    // If 'true' then the current world tick will last for 4 vblanks, otherwise it will last for 2 vblanks.
+    // 
+    // For PAL timings (without demo timings) the world tick duration varies because a world tick only fires when a player tick fires, which is
+    // every 2 vblanks. The world tick is INTENDED to trigger every 3 vblanks, but since it is tied to player ticks then the intervals between
+    // world ticks must be a multiple of the player tick interval (2 vblanks). Depending on timing, this sometimes means that world ticks last
+    // for 4 vblanks and sometimes just 2 vblanks. In this complex timing scenario world ticks should also normally switch between 4 and 2
+    // vblanks duration on each alternate frame, yielding a running average of ~3 vblanks duration...
+    //
+    // This variable is basically used to try and smooth out interpolation for the PAL (non demo-timing) case as much as possible.
+    // It's not possible to achieve totally smooth motion in this scenario because the interval between frames is constantly changing, which
+    // makes the animation speed seem inconsistent. At least it's an improvement in the right direction however, and the best we can do for
+    // this very complex scenario.
+    //
+    // Note also that we DON'T have to make this long vs short tick interpolation adjustment when we are using demo timings with PAL since
+    // player ticks are perfectly synchronized (they fire at the same time) as world ticks in that situation.
+    bool gbIsLongGameTick;
+#endif
+
+// Debug draw string position
+static int32_t gDebugDrawStringXPos;
+static int32_t gDebugDrawStringYPos;
+
+#if PSYDOOM_MODS
+//------------------------------------------------------------------------------------------------------------------------------------------
+// PsyDoom: play the intro movie and logos.
+// These were originally done outside of 'PSXDOOM.EXE' in the main launcher executable.
+// For PsyDoom however this logic needs to reside all within the same executable.
+//------------------------------------------------------------------------------------------------------------------------------------------
+static void D_PlayIntros() noexcept {
+    // Show the Sony intro logo
+    LogoPlayer::play(IntroLogos::getSonyLogo());
+
+    if (Input::isQuitRequested())
+        return;
+
+    // Play the intro movies (just the Williams logo for 'Doom' and 'Final Doom')
+    for (const String32& moviePath : Game::gConstants.introMovies) {
+        // The list of movies is terminated by a blank path
+        if (moviePath.length() <= 0)
+            break;
+
+        // Play the movie and quit afterwards if the game is shutting down:
+        const float movieFps = (Game::gGameVariant == GameVariant::PAL) ? 25.0f : 30.0f;
+        movie::MoviePlayer::play(moviePath.c_str().data(), movieFps);
+
+        if (Input::isQuitRequested())
+            return;
+    }
+
+    // Show the legal intro logos, if available for this game disc.
+    // Note: if it is a demo version of 'Doom' and legal logos are not available then emulate the demo behavior and show the special demo-only 'legals' UI.
+    IntroLogos::LogoList introLogos = IntroLogos::getLegalLogos();
+    bool bDidShowLegals = false;
+    
+    for (const LogoPlayer::Logo& logo : introLogos.logos) {
+        if (logo.pPixels && LogoPlayer::play(logo)) {
+            bDidShowLegals = true;
+        }
+
+        if (Input::isQuitRequested())
+            return;
+    }
+
+    if ((!bDidShowLegals) && Game::gbIsDemoVersion) {
+        MiniLoop(START_Legals, STOP_Legals, TIC_Legals, DRAW_Legals);
+    }
+}
+#endif  // #if PSYDOOM_MODS
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Main DOOM entry point.
+// Bootstraps the engine and platform specific code and runs the game loops.
+//------------------------------------------------------------------------------------------------------------------------------------------
+void D_DoomMain() noexcept {
+    // PlayStation specific setup
+    DMAIN_STEP("D_DoomMain: I_PSXInit");
+    I_PSXInit();
+
+    // Sound init:
+    #if PSYDOOM_MODS
+    {
+        // PsyDoom: apply the sound and music volumes from the saved preferences file now, before we init sound
+        DMAIN_STEP("D_DoomMain: pushSoundAndMusicPrefs");
+        PlayerPrefs::pushSoundAndMusicPrefs();
+
+        // PsyDoom: allocate a buffer big enough to hold the WMD file (as it is on disk) temporarily.
+        // The original PSX Doom used the 64 KiB static 'temp' buffer for this purpose; Final Doom did a temp 'Z_EndMalloc' of 122,880 bytes
+        // because it's WMD file was much bigger. This method is more flexible and will allow for practically any sized WMD.
+        DMAIN_STEP("D_DoomMain: psxcd_get_file_size DOOMSND_WMD");
+        const int32_t wmdFileSize = psxcd_get_file_size(CdFile::DOOMSND_WMD);
+        #if defined(__XBOX__)
+        {
+            // Xbox: log the size and use malloc to avoid std::unique_ptr + new exception path issues
+            char szWmdSz[64];
+            sprintf(szWmdSz, "D_DoomMain: wmdFileSize=%d", (int)wmdFileSize);
+            xbLog(szWmdSz);
+            void* pWmdBuf = malloc((wmdFileSize > 0) ? (size_t)wmdFileSize : 1u);
+            DMAIN_STEP("D_DoomMain: wmd malloc done");
+            DMAIN_STEP("D_DoomMain: PsxSoundInit");
+            PsxSoundInit(doomToWessVol(gOptionsSndVol), doomToWessVol(gOptionsMusVol), pWmdBuf);
+            DMAIN_STEP("D_DoomMain: PsxSoundInit done");
+            free(pWmdBuf);
+            // Xbox: force-restart the audio device after heavy WESS init to guarantee a fresh
+            // PLAYING state with functioning callbacks.  A simple ensureAudioDevicePlaying() is
+            // insufficient when nxdk enters a ghost-PLAYING state (status=PLAYING / CBS:0).
+            PsxVm::restartAudioDevice();
+            DMAIN_STEP("D_DoomMain: audio device restarted after PsxSoundInit");
+        }
+        #else
+        {
+            std::unique_ptr<std::byte[]> wmdFileBuffer(new std::byte[wmdFileSize]);
+            DMAIN_STEP("D_DoomMain: PsxSoundInit");
+            PsxSoundInit(doomToWessVol(gOptionsSndVol), doomToWessVol(gOptionsMusVol), wmdFileBuffer.get());
+        }
+        #endif
+    }
+    #else
+        PsxSoundInit(doomToWessVol(gOptionsSndVol), doomToWessVol(gOptionsMusVol), gTmpBuffer);
+    #endif
+
+    // Initializing standard DOOM subsystems, zone memory management, WAD, platform stuff, renderer etc.
+    DMAIN_STEP("D_DoomMain: Z_Init");
+    Z_Init();
+    DMAIN_STEP("D_DoomMain: Z_Init done");
+    DMAIN_STEP("D_DoomMain: I_Init");
+    I_Init();
+    DMAIN_STEP("D_DoomMain: I_Init done");
+    DMAIN_STEP("D_DoomMain: W_Init");
+    W_Init();
+    DMAIN_STEP("D_DoomMain: W_Init done");
+    DMAIN_STEP("D_DoomMain: R_Init");
+    R_Init();
+    DMAIN_STEP("D_DoomMain: R_Init done");
+
+    // PsyDoom: build the (now) dynamically generated lists of sprites, map objects, animated textures and switches for the game.
+    // User mods can add new entries to any of these lists. Also initialize MAPINFO.
+    #if PSYDOOM_MODS
+        DMAIN_STEP("D_DoomMain: MapInfo::init");
+        MapInfo::init();        // Do this first since GEC MAPINFO can affect the base lists of animations and switches
+        P_InitSprites();
+
+        // Xbox: remember the game's own super shotgun frames and apply whatever style is set.
+        //
+        // Has to be after 'P_InitSprites', because that is what turns the borrowed WADs' lumps into sprites at all -
+        // before it there is nothing to point anywhere. Not portable.
+        #if defined(__XBOX__)
+            SsgStyle::init();
+            PlayerColour::init();
+        #endif
+
+        P_InitMobjInfo();
+        P_InitAnimDefs();
+        P_InitSwitchDefs();
+    #endif
+
+    DMAIN_STEP("D_DoomMain: ST_Init");
+    ST_Init();
+
+    #if PSYDOOM_MODS
+        // PsyDoom: new cleanup logic before we exit
+        const auto dmainCleanup = finally([]() noexcept {
+            MapInfo::shutdown();
+            W_Shutdown();
+        });
+
+        // PsyDoom: are we warping straight to a map and bypassing menus?
+        if (ProgArgs::gWarpMap > 0) {
+            gbStartupWarpToMap = true;
+            gStartSkill = ProgArgs::gWarpSkill;
+            gStartMapOrEpisode = ProgArgs::gWarpMap;
+            gStartGameType = gt_single;
+        }
+
+        // PsyDoom: play intro movies and logos unless disabled.
+        // Note: also skip them if we are playing a demo file or warping directly to a map.
+        const bool bSkipIntros = (Config::gbSkipIntros || ProgArgs::gPlayDemoFilePath[0] || gbStartupWarpToMap);
+
+        DMAIN_STEP("D_DoomMain: intros check");
+        if (!bSkipIntros) {
+            DMAIN_STEP("D_DoomMain: D_PlayIntros");
+            D_PlayIntros();
+            DMAIN_STEP("D_DoomMain: D_PlayIntros done");
+        }
+    #endif
+
+    // Clearing some global tick counters and inputs
+    DMAIN_STEP("D_DoomMain: clearing tick counters");
+    gPrevGameTic = 0;
+    gGameTic = 0;
+    gLastTgtGameTicCount = 0;
+    gTicCon = 0;
+
+    #if PSYDOOM_MODS
+        D_UpdateIsLongGameTick();   // Needs to be called whenever we start a new game tick
+
+        for (uint32_t playerIdx = 0; playerIdx < MAXPLAYERS; ++playerIdx) {
+            gTickInputs[playerIdx] = {};
+            gOldTickInputs[playerIdx] = {};
+        }
+
+        gNextTickInputs = {};
+        gTicButtons = 0;
+        gOldTicButtons = 0;
+    #else
+        for (uint32_t playerIdx = 0; playerIdx < MAXPLAYERS; ++playerIdx) {
+            gTicButtons[playerIdx] = 0;
+            gOldTicButtons[playerIdx] = 0;
+        }
+    #endif
+
+    #if PSYDOOM_MODS
+        // PsyDoom: put whatever password was saved into the game's password system.
+        // This way it will be waiting for the player upon opening that menu:
+        PlayerPrefs::pushLastPassword();
+
+        // PsyDoom: play a single demo file and exit if commanded.
+        // Also, if in headless mode then don't run the main game - only single demo playback is allowed.
+        if (ProgArgs::gPlayDemoFilePath[0]) {
+            RunDemoAtPath(ProgArgs::gPlayDemoFilePath);
+            return;
+        }
+
+        if (ProgArgs::gbHeadlessMode)
+            return;
+    #endif
+
+    // The main intro and demo scenes flow.
+    // Continue looping until there is input and then execute the main menu until it times out.
+    constexpr auto continueRunning = []() noexcept {
+        // PsyDoom: the previously never-ending game loop can now be broken if the application is requesting to quit
+        #if PSYDOOM_MODS
+            return (!Input::isQuitRequested());
+        #else
+            return true;
+        #endif
+    };
+
+    DMAIN_STEP("D_DoomMain: entering main loop");
+    while (continueRunning()) {
+        // PsyDoom: treat 'ga_quitapp' the same as 'ga_exit' here.
+        // This makes us skip over the demo sequences and credits etc. if the app is quitting.
+        constexpr auto didExit = [](const gameaction_t action) noexcept {
+            #if PSYDOOM_MODS
+                return ((action == ga_exit) || (action == ga_quitapp));
+            #else
+                return (action == ga_exit);
+            #endif
+        };
+
+        DMAIN_STEP("D_DoomMain: RunTitle");
+        if (!didExit(RunTitle())) {
+            // PsyDoom: use a new, more flexible method of playing demos.
+            // The constants for the game now define the list of demos to play.
+            #if PSYDOOM_MODS
+                bool bGotoTitle = false;    // Only go to the title if all demos were played without interruption and at least 1 demo was played
+
+                for (uint32_t demoIdx = 0; demoIdx < C_ARRAY_SIZE(GameConstants::demos); ++demoIdx) {
+                    // Grab the details for the current demo; if there are no more demos then playback stops:
+                    gCurBuiltInDemo = Game::gConstants.demos[demoIdx];
+
+                    if (gCurBuiltInDemo.filename.length() <= 0)
+                        break;
+
+                    // Run the demo itself
+                    bGotoTitle = true;
+
+                    if (didExit(RunDemo(gCurBuiltInDemo.filename))) {
+                        bGotoTitle = false;
+                        break;
+                    }
+
+                    // Show a credits screen after this demo?
+                    if (gCurBuiltInDemo.bShowCreditsAfter) {
+                        if (didExit(RunCredits())) {
+                            bGotoTitle = false;
+                            break;
+                        }
+                    }
+                }
+
+                // Re-run the title screen again?
+                if (bGotoTitle)
+                    continue;
+            #else
+                if (!didExit(RunDemo(CdFile::DEMO1_LMP))) {
+                    if (!didExit(RunCredits())) {
+                        if (!didExit(RunDemo(CdFile::DEMO2_LMP)))
+                            continue;
+                    }
+                }
+            #endif
+        }
+
+        while (continueRunning()) {
+            // Go back to the title screen if timing out
+            const gameaction_t result = RunMenu();
+
+            if (result == ga_timeout)
+                break;
+
+            // PsyDoom: quit the application entirely if requested
+            #if PSYDOOM_MODS
+                if (result == ga_quitapp)
+                    return;
+            #endif
+        }
+    }
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Runs a screen with scrolling legals text.
+// This function is never called in the retail game, but was used for the PSX DOOM demo build.
+//------------------------------------------------------------------------------------------------------------------------------------------
+gameaction_t RunLegals() noexcept {
+    return MiniLoop(START_Legals, STOP_Legals, TIC_Legals, DRAW_Legals);
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Runs the title screen
+//------------------------------------------------------------------------------------------------------------------------------------------
+gameaction_t RunTitle() noexcept {
+    // PsyDoom: if warping straight to a map then skip the title
+    #if PSYDOOM_MODS
+        if (gbStartupWarpToMap)
+            return ga_exit;
+    #endif
+
+    return MiniLoop(START_Title, STOP_Title, TIC_Title, DRAW_Title);
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Load and run the specified (built-in) demo file
+//------------------------------------------------------------------------------------------------------------------------------------------
+gameaction_t RunDemo(const CdFileId file) noexcept {
+    // PsyDoom: ensure this required graphic is loaded before starting the demo.
+    // Also skip running the demo if the file does not exist.
+    #if PSYDOOM_MODS
+        if (!gTex_LOADING.bIsCached) {
+            I_LoadAndCache_LOADING_TexLump(gTex_LOADING);
+        }
+
+        if (CdMapTbl_GetEntry(file).size <= 0)
+            return ga_nothing;
+    #endif
+
+    // Open the demo file
+    const uint32_t openFileIdx = OpenFile(file);
+
+    // PsyDoom: determine the file size to read and only read the actual size of the demo rather than assuming it's 16 KiB.
+    // Also allocate the demo buffer on the native host heap, so as to allow very large demos without affecting zone memory.
+    #if PSYDOOM_MODS
+        const int32_t demoFileSize = SeekAndTellFile(openFileIdx, 0, PsxCd_SeekMode::END);
+
+        std::unique_ptr<std::byte[]> pDemoBuffer(new std::byte[demoFileSize]);
+        gpDemoBuffer = pDemoBuffer.get();
+        gpDemoBufferEnd = pDemoBuffer.get() + demoFileSize;
+
+        SeekAndTellFile(openFileIdx, 0, PsxCd_SeekMode::SET);
+        ReadFile(openFileIdx, gpDemoBuffer, demoFileSize);
+    #else
+        // Read the demo file contents (up to 16 KiB)
+        constexpr uint32_t DEMO_BUFFER_SIZE = 16 * 1024;
+        gpDemoBuffer = (std::byte*) Z_EndMalloc(*gpMainMemZone, DEMO_BUFFER_SIZE, PU_STATIC, nullptr);
+        ReadFile(openFileIdx, gpDemoBuffer->get(), 16 * 1024);
+    #endif
+
+    CloseFile(openFileIdx);
+
+    // Play the demo, free the demo buffer and return the exit action
+    const gameaction_t exitAction = G_PlayDemoPtr();
+
+    // PsyDoom: the demo buffer is no longer allocated through the zone memory system; std::unique_ptr will also cleanup after itself
+    #if !PSYDOOM_MODS
+        Z_Free2(*gpMainMemZone, gpDemoBuffer);
+    #endif
+
+    return exitAction;
+}
+
+#if PSYDOOM_MODS
+//------------------------------------------------------------------------------------------------------------------------------------------
+// PsyDoom: load and run the specified demo file at the specified path on the host machine
+//------------------------------------------------------------------------------------------------------------------------------------------
+gameaction_t RunDemoAtPath(const char* const filePath) noexcept {
+    // Ensure this required graphic is loaded before starting the demo.
+    // PsyDoom: the meaning of 'texPageId' has changed slightly, '0' is now the 1st page and 'bIsCached' is used check cache residency.
+    if (!gTex_LOADING.bIsCached) {
+        I_LoadAndCache_LOADING_TexLump(gTex_LOADING);
+    }
+
+    // Read the demo file into memory
+    const FileData fileData = FileUtils::getContentsOfFile(filePath);
+
+    if (!fileData.bytes) {
+        FatalErrors::raiseF("Unable to read demo file '%s'! Is the file path valid?", filePath);
+    }
+
+    // Set the info for the current built-in demo in case we are playing one of those.
+    // Use the current game settings to determine the demo's game behavior and format.
+    BuiltInDemoDef& demoDef = gCurBuiltInDemo;
+    demoDef = {};
+    demoDef.bFinalDoomDemo = (Game::gGameType != GameType::Doom);
+    demoDef.bPalDemo = (Game::gGameVariant == GameVariant::PAL);
+
+    // Setup the demo buffers and play the demo file
+    gpDemoBuffer = fileData.bytes.get();
+    gpDemoBufferEnd = fileData.bytes.get() + fileData.size;
+
+    const gameaction_t exitAction = G_PlayDemoPtr();
+
+    // Cleanup after we are done
+    gpDemoBuffer = nullptr;
+    gpDemoBufferEnd = nullptr;
+
+    // After user requested demo playback has finished show the intermission screen, if applicable, so that stats can be examined.
+    // We allow the intermission to be shown if not in headless mode and if the end of the level was actually reached (didn't die, quit, restart etc.).
+    const bool bDidCompleteLevel = DemoPlayer::wasLevelCompleted();
+    const bool bShowIntermissionScreen = (bDidCompleteLevel && (!Input::isQuitRequested()) && (!ProgArgs::gbHeadlessMode));
+
+    if (bShowIntermissionScreen) {
+        // Never show the next map when playing a demo, because we immediately quit after this
+        gbIntermissionHideNextMap = true;
+
+        // Force the game into single player mode for the intermission screen since we've got no more inputs from other players (demo end reached).
+        // Display the intermission screen using whatever network game type the demo contained, however:
+        gIntermissionNetGameTypeOverride = gNetGame;
+        gNetGame = gt_single;
+
+        // Show the intermission screen and cleanup the network game type override once done:
+        #if defined(__XBOX__)
+                MiniLoop(IN_Start, IN_Stop, IN_Ticker, (Splitscreen::isActive()) ? IN_DrawerSplit : IN_Drawer);
+            #else
+                MiniLoop(IN_Start, IN_Stop, IN_Ticker, IN_Drawer);
+            #endif
+        gIntermissionNetGameTypeOverride = gt_none;
+    }
+
+    return exitAction;
+}
+#endif  // #if PSYDOOM_MODS
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Runs the credits screen
+//------------------------------------------------------------------------------------------------------------------------------------------
+gameaction_t RunCredits() noexcept {
+    return MiniLoop(START_Credits, STOP_Credits, TIC_Credits, DRAW_Credits);
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Set the text position for the debug draw string
+//------------------------------------------------------------------------------------------------------------------------------------------
+void I_SetDebugDrawStringPos(const int32_t x, const int32_t y) noexcept {
+    gDebugDrawStringXPos = x;
+    gDebugDrawStringYPos = y;
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Draw the debug draw string.
+// The string also scrolls down the screen with repeated calls.
+//------------------------------------------------------------------------------------------------------------------------------------------
+void I_DebugDrawString(const char* const fmtMsg, ...) noexcept {
+    // Setup the drawing mode
+    {
+        // PsyDoom: explicitly clear the texture window here also to disable wrapping - don't rely on previous drawing code to do that
+        // PsyDoom: use local instead of scratchpad draw primitives; compiler can optimize better, and removes reliance on global state
+        #if PSYDOOM_MODS
+            DR_MODE drawModePrim = {};
+            const SRECT texWindow = { (int16_t) gTex_STATUS.texPageCoordX, (int16_t) gTex_STATUS.texPageCoordY, 256, 256 };
+            LIBGPU_SetDrawMode(drawModePrim, false, false, gTex_STATUS.texPageId, &texWindow);
+        #else
+            DR_MODE& drawModePrim = *(DR_MODE*) LIBETC_getScratchAddr(128);
+            LIBGPU_SetDrawMode(drawModePrim, false, false, gTex_STATUS.texPageId, nullptr);
+        #endif
+    }
+
+    // Setting up some sprite primitive stuff for the 'draw string' call that follows.
+    // PsyDoom: no longer need to do this, not using scratchpad globals and 'draw string' now requires explicit shading settings.
+    #if !PSYDOOM_MODS
+    {
+        SPRT& spritePrim = *(SPRT*) LIBETC_getScratchAddr(128);
+
+        LIBGPU_SetSprt(spritePrim);
+        LIBGPU_SetSemiTrans(spritePrim, false);
+        LIBGPU_SetShadeTex(spritePrim, false);
+        LIBGPU_setRGB0(spritePrim, 128, 128, 128);
+        spritePrim.clut = Game::getTexClut_DebugFontSmall();
+    }
+    #endif  // #if !PSYDOOM_MODS
+
+    // Format the message and print
+    char msgBuffer[256];
+
+    {
+        va_list args;
+        va_start(args, fmtMsg);
+
+        // PsyDoom: Use 'vsnprint' as it's safer!
+        #if PSYDOOM_MODS
+            std::vsnprintf(msgBuffer, C_ARRAY_SIZE(msgBuffer), fmtMsg, args);
+        #else
+            D_vsprintf(msgBuffer, fmtMsg, args);
+        #endif
+
+        va_end(args);
+    }
+
+    // PsyDooom: have to explicitly specify sprite shading parameters now for 'draw string' rather than relying on global state
+    #if PSYDOOM_MODS
+        I_DrawStringSmall(
+            gDebugDrawStringXPos,
+            gDebugDrawStringYPos,
+            msgBuffer,
+            Game::getTexClut_STATUS(),
+            128,
+            128,
+            128,
+            false,
+            false
+        );
+    #else
+        I_DrawStringSmall(gDebugDrawStringXPos, gDebugDrawStringYPos, msgBuffer);
+    #endif
+
+    // The message scrolls down the screen as it is drawn more
+    gDebugDrawStringYPos += 8;
+}
+
+#if PSYDOOM_MODS
+//------------------------------------------------------------------------------------------------------------------------------------------
+// PsyDoom: draws frame performance counters (average frame duration and FPS) at the top left of the screen if they are enabled
+//------------------------------------------------------------------------------------------------------------------------------------------
+void I_DrawEnabledPerfCounters() noexcept {
+    // Are we showing performance counters?
+    if (!Config::gbShowPerfCounters)
+        return;
+
+    // If using the Vulkan renderer, draw then as far as possible to the left, being widescreen aware:
+    int32_t widescreenAdjust = 0;
+
+    #if PSYDOOM_VULKAN_RENDERER
+        if (Video::isUsingVulkanRenderPath() && Config::gbVulkanWidescreenEnabled) {
+            // Compute the extra space/padding at the left and right sides of the screen (in PSX coords) due to widescreen.
+            // This is the same calculation used by the Vulkan renderer in 'VDrawing::computeTransformMatrixForUI'.
+            const float xPadding = (VRenderer::gPsxCoordsFbX / VRenderer::gPsxCoordsFbW) * (float) SCREEN_W;
+            widescreenAdjust = (int32_t) -xPadding;
+        }
+    #endif
+
+    // Need to setup the texture window beforehand for the draw string calls
+    {
+        DR_MODE drawModePrim = {};
+        const SRECT texWindow = { (int16_t) gTex_STATUS.texPageCoordX, (int16_t) gTex_STATUS.texPageCoordY, 256, 256 };
+        LIBGPU_SetDrawMode(drawModePrim, false, false, gTex_STATUS.texPageId, &texWindow);
+        I_AddPrim(drawModePrim);
+    }
+
+    // Show average frame microseconds elapsed
+    char msgBuffer[256];
+    std::snprintf(msgBuffer, sizeof(msgBuffer), "USEC: %zu", (size_t)(gPerfAvgUsec + 0.5f));
+    I_DrawStringSmall(2 + widescreenAdjust, 2, msgBuffer, Game::getTexClut_STATUS(), 128, 255, 255, false, false);
+
+    // Show average FPS counter
+    std::snprintf(msgBuffer, sizeof(msgBuffer), "FPS:  %.1f", gPerfAvgFps);
+    I_DrawStringSmall(2 + widescreenAdjust, 10, msgBuffer, Game::getTexClut_STATUS(), 128, 255, 255, false, false);
+}
+#endif  // #if PSYDOOM_MODS
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Set a region of memory to a specified byte value.
+// Bulk writes in 32-byte chunks where possible.
+//------------------------------------------------------------------------------------------------------------------------------------------
+void D_memset(void* const pDst, const std::byte fillByte, const uint32_t count) noexcept {
+    // Fill up until the next aligned 32-bit address
+    uint32_t bytesLeft = count;
+    std::byte* pDstByte = (std::byte*) pDst;
+
+    while (((uintptr_t) pDstByte & 3) != 0) {
+        if (bytesLeft == 0)
+            return;
+
+        *pDstByte = fillByte;
+        ++pDstByte;
+        --bytesLeft;
+    }
+
+    // Fill 32 bytes at a time (with 8 writes)
+    {
+        const uint32_t fb32 = (uint32_t) fillByte;
+        const uint32_t fillWord = (fb32 << 24) | (fb32 << 16) | (fb32 << 8) | fb32;
+
+        while (bytesLeft >= 32) {
+            uint32_t* const pDstWords = (uint32_t*) pDstByte;
+
+            pDstWords[0] = fillWord;
+            pDstWords[1] = fillWord;
+            pDstWords[2] = fillWord;
+            pDstWords[3] = fillWord;
+            pDstWords[4] = fillWord;
+            pDstWords[5] = fillWord;
+            pDstWords[6] = fillWord;
+            pDstWords[7] = fillWord;
+
+            pDstByte += 32;
+            bytesLeft -= 32;
+        }
+    }
+
+    // Fill the remaining bytes
+    while (bytesLeft != 0) {
+        *pDstByte = fillByte;
+        bytesLeft--;
+        pDstByte++;
+    }
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Copy a number of bytes from source to destination
+//------------------------------------------------------------------------------------------------------------------------------------------
+void D_memcpy(void* const pDst, const void* const pSrc, const uint32_t numBytes) noexcept {
+    uint32_t bytesLeft = numBytes;
+    std::byte* pDstByte = (std::byte*) pDst;
+    const std::byte* pSrcByte = (const std::byte*) pSrc;
+
+    while (bytesLeft != 0) {
+        bytesLeft--;
+        *pDstByte = *pSrcByte;
+        ++pSrcByte;
+        ++pDstByte;
+    }
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Copy up to 'maxChars' from 'src' to 'dst'
+//------------------------------------------------------------------------------------------------------------------------------------------
+void D_strncpy(char* dst, const char* src, uint32_t maxChars) noexcept {
+    while (maxChars != 0) {
+        const char c = *dst = *src;
+        --maxChars;
+        ++src;
+        ++dst;
+
+        if (c == 0)
+            break;
+    }
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Compare two strings, up to 'maxCount' characters.
+// Return '0' if equal or '1' if not equal.
+// Confusingly, unlike the equivalent standard C function, this comparison is *NOT* case insensitive.
+//------------------------------------------------------------------------------------------------------------------------------------------
+int32_t D_strncasecmp(const char* str1, const char* str2, int32_t maxCount) noexcept {
+    while (*str1 && *str2) {
+        if (*str1 != *str2)
+            return 1;
+
+        ++str1;
+        ++str2;
+        --maxCount;
+
+        // Bug fix: if the function is called with 'maxCount' as '0' for some reason then prevent a near infinite loop
+        // due to wrapping around to '-1'. I don't think this happened in practice but just guard against it here anyway
+        // in case future mods happen to trigger this issue...
+        #if PSYDOOM_MODS
+            if (maxCount <= 0)
+                return 0;
+        #else
+            if (maxCount == 0)
+                return 0;
+        #endif
+    }
+
+    return (*str1 == *str2);
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Makes the given ASCII string uppercase
+//------------------------------------------------------------------------------------------------------------------------------------------
+void D_strupr(char* str) noexcept {
+    for (char c = *str; c != 0; c = *str) {
+        if (c >= 'a' && c <= 'z') {
+            c -= 32;
+        }
+
+        *str = c;
+        ++str;
+    }
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Runs the game loop for a menu screen or for the level gameplay.
+// Calls startup/shutdown functions and drawer/ticker functions.
+//------------------------------------------------------------------------------------------------------------------------------------------
+gameaction_t MiniLoop(
+    void (*const pStart)(),
+    void (*const pStop)(const gameaction_t exitAction),
+    gameaction_t (*const pTicker)(),
+    void (*const pDrawer)()
+) noexcept {
+    // Network initialization
+    if (gNetGame != gt_single) {
+        I_NetHandshake();
+    }
+
+    // Init timers and exit action
+    gGameAction = ga_nothing;
+    gPrevGameTic = 0;
+    gGameTic = 0;
+    gTicCon = 0;
+    gLastTgtGameTicCount = 0;
+
+    #if PSYDOOM_MODS
+        gbIsFirstTick = true;
+        D_UpdateIsLongGameTick();   // Needs to be called whenever we start a new game tick
+        Input::consumeEvents();     // Clear any input events leftover
+    #endif
+
+    // Run startup logic for this game loop beginning
+    pStart();
+
+    // PsyDoom: sound update in case the start action played something
+    #if PSYDOOM_MODS
+        S_UpdateSounds();
+    #endif
+
+    // Update the video refresh timers.
+    // PsyDoom: use 'I_GetTotalVBlanks' because it can adjust time in networked games.
+    #if PSYDOOM_MODS
+        gLastTotalVBlanks = I_GetTotalVBlanks();
+    #else
+        gLastTotalVBlanks = LIBETC_VSync(-1);
+    #endif
+
+    gElapsedVBlanks = 0;
+
+    // PsyDoom: stuff relating to profiling the game loop and timing frame durations
+    typedef std::chrono::high_resolution_clock frametimer_t;
+
+    #if PSYDOOM_MODS
+        frametimer_t::time_point frameStartTime = frametimer_t::now();      // When we started the current frame
+        gPrevFrameDuration = 0.0;                                           // No previous frame duration (yet)
+
+        frametimer_t::time_point profilerStartTime = frameStartTime;        // When we started profiling the current few frames
+        uint32_t profilerNumFramesElapsed = 0;                              // How many frames have elapsed for the frame profiler
+        gPerfAvgFps = 0;                                                    // Don't know this yet, frame profiler will tell us later!
+        gPerfAvgUsec = 0;                                                   // Don't know this yet, frame profiler will tell us later!
+    #endif
+
+    // Continue running the game loop until something causes us to exit
+    gameaction_t exitAction = ga_nothing;
+
+    while (true) {
+        // PsyDoom: initially assume no elasped vblanks for all players until found otherwise.
+        // For net games we should get some elapsed vblanks from the other player in their packet, if it's time to read a new packet.
+        // It will be time to read a new packet if we update inputs and timing.
+        #if PSYDOOM_MODS
+            for (int32_t i = 0; i < MAXPLAYERS; ++i) {
+                gPlayersElapsedVBlanks[i] = 0;
+            }
+        #endif
+
+        // Update timing and buttons.
+        // PsyDoom: only do if enough time has elapsed or if it's the first frame, due to potentially uncapped framerate.
+        gPlayersElapsedVBlanks[gCurPlayerIndex] = gElapsedVBlanks;
+
+        #if defined(__XBOX__)
+            // Splitscreen: player two's time passes at the same rate as player one's.
+            //
+            // This is why player two could never move. Their elapsed vblanks arrived in the link cable packet and
+            // nothing else ever set them, so with the connect skipped they stayed at the zero assigned just above.
+            // Movement, and turning, are both scaled by that count:
+            //
+            //      timeScale   = gPlayersElapsedVBlanks[gPlayerNum]     // p_user.cpp, applied to forward and side move
+            //      mobj.angle += player.angleturn * gPlayersElapsedVBlanks[gPlayerNum]
+            //
+            // so every movement player two made was multiplied by zero. Their inputs were arriving correctly the whole
+            // time - measured 'p2 think sees: fwd=-43346 attack=1 use=1' with 'momxy=0,0' beside it - which is also why
+            // buttons always worked: weapon switching, use and attack are not scaled by elapsed time, and movement and
+            // turning are the only things that are. Both players share one console and one frame, so they share its
+            // elapsed time.
+            if (Splitscreen::isActive()) {
+                gPlayersElapsedVBlanks[1] = gElapsedVBlanks;
+            }
+        #endif
+
+        #if PSYDOOM_MODS
+            const bool bUpdateInputsAndTiming = ((gElapsedVBlanks > 0) || gbIsFirstTick);
+        #else
+            const bool bUpdateInputsAndTiming = true;
+        #endif
+
+        if (bUpdateInputsAndTiming) {
+            // Read pad inputs and save as the current pad buttons (note: overwritten if a demo); also save old inputs for button just pressed detection.
+            // PsyDoom: read tick inputs in addition to raw gamepad inputs, this is now the primary input source.
+            #if PSYDOOM_MODS
+                for (uint32_t playerIdx = 0; playerIdx < MAXPLAYERS; ++playerIdx) {
+                    gOldTickInputs[playerIdx] = gTickInputs[playerIdx];
+                }
+
+                gOldTicButtons = gTicButtons;
+
+                // Note: ensure we have the latest input events prior to this with a call to 'Input::update'
+                TickInputs& tickInputs = gTickInputs[gCurPlayerIndex];
+                Input::update();
+                P_GatherTickInputs(tickInputs);
+                gTicButtons = I_ReadGamepad();
+
+                // Splitscreen: gather player two from their own pad and their own bindings.
+                //
+                // This is what the link cable used to deliver. Selecting the player is what makes the binding lookups
+                // read player two's set, and it goes back afterwards so everything else sees player one as before.
+                #if defined(__XBOX__)
+                    if (Splitscreen::isActive()) {
+                        Controls::setActivePlayer(1);
+
+                        // What 'Controls' returns for player two, measured beside what their pad holds.
+                        //
+                        // This is the last gap. Their pad reaches gGamepadInputsP2 - lx=-762 ly=-999 was measured -
+                        // and their think sees zero. Everything between those two points is this call. Reading the
+                        // binding and the raw pad value in the same breath says which side of 'Controls' loses it.
+                        {
+                            static uint32_t sLastGap = 0;
+
+                            if (gTicCon - sLastGap >= 60) {
+                                sLastGap = gTicCon;
+
+                                XBOX_LOGI(
+                                    Split,
+                                    "p2 gap: pad ly=%d lx=%d | controls fwd=%d back=%d strafeR=%d attack=%d (x1000)",
+                                    (int)(Input::getGamepadInputValueP2(GamepadInput::AXIS_LEFT_Y) * 1000.0f),
+                                    (int)(Input::getGamepadInputValueP2(GamepadInput::AXIS_LEFT_X) * 1000.0f),
+                                    (int)(Controls::getFloat(Controls::Binding::Analog_MoveForward) * 1000.0f),
+                                    (int)(Controls::getFloat(Controls::Binding::Analog_MoveBackward) * 1000.0f),
+                                    (int)(Controls::getFloat(Controls::Binding::Analog_StrafeRight) * 1000.0f),
+                                    (int)(Controls::getBool(Controls::Binding::Action_Attack) ? 1000 : 0)
+                                );
+                            }
+                        }
+
+                        P_GatherTickInputs(gTickInputs[1]);
+
+                        // Pause player two straight from their pad.
+                        //
+                        // Measured: their start button reaches 'gGamepadInputsP2' with a clean 0 to 1 transition and
+                        // back, and the tick loop only ever sees pause edges from player one - so the binding lookup
+                        // between those two points is what fails, not the button. This takes the edge from the array
+                        // that is known to be correct, so pause works regardless of what the binding resolves to.
+                        {
+                            static bool sP2StartWas = false;
+
+                            const bool bP2StartNow = (Input::getGamepadInputValueP2(GamepadInput::BTN_START) >= 0.5f);
+
+                            if (bP2StartNow && (!sP2StartWas)) {
+                                gbXbP2PauseLatched = true;
+                            }
+
+                            sP2StartWas = bP2StartNow;
+
+                            // Select, for opening their own options menu while the game is paused
+                            static bool sP2SelectWas = false;
+
+                            const bool bP2SelectNow = (Input::getGamepadInputValueP2(GamepadInput::BTN_BACK) >= 0.5f);
+
+                            if (bP2SelectNow && (!sP2SelectWas)) {
+                                gbXbP2MenuBackLatched = true;
+                            }
+
+                            sP2SelectWas = bP2SelectNow;
+                        }
+
+                        // Did the gather actually produce a pause edge for player two this frame?
+                        //
+                        // The gather runs every frame; the loop that acts on pause runs every tick. If the edge lands
+                        // on a frame that is not a tick, it is overwritten by the next gather before anything reads it.
+                        // Counting them here and acting on them there says whether that is what is happening.
+                        if (gTickInputs[1].fTogglePause()) {
+                            gXbP2PauseEdges++;
+                            XBOX_LOGI(Split, "p2 pause edge produced at gather (total %u)", gXbP2PauseEdges);
+                        }
+
+                        Controls::setActivePlayer(0);
+
+                        // Report both players' inputs here, where they have just been gathered.
+                        //
+                        // The report used to sit at the end of drawing, which is after the tick has consumed them, so
+                        // it showed zeroes for both players even while player one was plainly moving - it was reading
+                        // state that had already been reset. Read them where they are freshest instead.
+                        static uint32_t sInputReportTic = 0;
+
+                        if (gTicCon - sInputReportTic >= 60) {
+                            sInputReportTic = gTicCon;
+
+                            XBOX_LOGI(
+                                Split,
+                                "inputs p1 fwd=%d side=%d turn=%d fire=%d use=%d | p2 fwd=%d side=%d turn=%d fire=%d use=%d",
+                                (int) gTickInputs[0].getAnalogForwardMove(),
+                                (int) gTickInputs[0].getAnalogSideMove(),
+                                (int) gTickInputs[0].getAnalogTurn(),
+                                (int) gTickInputs[0].fAttack(),
+                                (int) gTickInputs[0].fUse(),
+                                (int) gTickInputs[1].getAnalogForwardMove(),
+                                (int) gTickInputs[1].getAnalogSideMove(),
+                                (int) gTickInputs[1].getAnalogTurn(),
+                                (int) gTickInputs[1].fAttack(),
+                                (int) gTickInputs[1].fUse()
+                            );
+                        }
+                    }
+                #endif
+            #else
+                for (uint32_t playerIdx = 0; playerIdx < MAXPLAYERS; ++playerIdx) {
+                    gOldTicButtons[playerIdx] = gTicButtons[playerIdx];
+                }
+
+                uint32_t padBtns = I_ReadGamepad();
+                gTicButtons[gCurPlayerIndex] = padBtns;
+            #endif
+
+            if (gNetGame != gt_single) {
+                // PsyDoom: check if any keys to exit demo playback are pressed.
+                // Have to do it here before the network update, since that overwrites actual physical user inputs.
+                #if PSYDOOM_MODS
+                    const bool bExitDemoPlaybackKeysPressed = (tickInputs.fMenuOk() || tickInputs.fMenuBack() || tickInputs.fMenuStart());
+                #endif
+
+                // Updates for when we are in a networked game: abort from the game also if there is a problem
+                const bool bNetError = I_NetUpdate();
+
+                if (bNetError) {
+                    // PsyDoom: if a network error occurs don't try to restart the level, the connection is most likely still gone.
+                    // Exit to the main menu instead.
+                    #if PSYDOOM_MODS
+                        gGameAction = ga_exitdemo;
+                        exitAction = ga_exitdemo;
+                    #else
+                        gGameAction = ga_warped;
+                        exitAction = ga_warped;
+                    #endif
+
+                    break;
+                }
+
+                #if PSYDOOM_MODS
+                    // PsyDoom: recording demo ticks for multiplayer mode
+                    if (DemoRecorder::isRecording()) {
+                        DemoRecorder::recordTick();
+                    }
+
+                    // PsyDoom: check if the demo is done due to the pause key being pressed.
+                    // When playing back check for the exit demo keys or for when the end of the demo is reached.
+                    const bool bIsAnyPlayerPausing = (gTickInputs[0].fTogglePause() || gTickInputs[1].fTogglePause());
+                    const bool bDoingADemo = (gbDemoPlayback || gbNetIsGameBeingRecorded);
+                    const bool bPausedDuringADemo = (bDoingADemo && bIsAnyPlayerPausing);
+                    const bool bExitDemoPlayback = (gbDemoPlayback && bExitDemoPlaybackKeysPressed);
+                    const bool bDemoPlaybackFinished = (gbDemoPlayback && DemoPlayer::hasReachedDemoEnd());
+
+                    if (bPausedDuringADemo || bExitDemoPlayback || bDemoPlaybackFinished) {
+                        // If pausing while recording then just end recording and allow gameplay to proceed instead of quitting the game
+                        if (bPausedDuringADemo && gbNetIsGameBeingRecorded) {
+                            if (DemoRecorder::isRecording()) {
+                                DemoRecorder::end();
+                                gStatusBar.message = "Recording ended.";
+                                gStatusBar.messageTicsLeft = 30;
+                            }
+                        }
+                        else {
+                            exitAction = ga_exitdemo;
+                            gGameAction = ga_exitdemo;
+                            break;
+                        }
+                    }
+                #endif
+            }
+            else if (gbDemoRecording || gbDemoPlayback) {
+                // Demo recording or playback.
+                // Need to either read inputs from or save them to a buffer.
+                if (gbDemoPlayback) {
+                    // Demo playback: any button pressed on the gamepad will abort.
+                    // PsyDoom: just use the menu action buttons to abort.
+                    exitAction = ga_exit;
+
+                    #if PSYDOOM_MODS
+                        if (tickInputs.fMenuOk() || tickInputs.fMenuBack() || tickInputs.fMenuStart())
+                            break;
+                    #else
+                        if (padBtns & PAD_ANY_BTNS)
+                            break;
+                    #endif
+
+                    // Read inputs from the demo buffer and advance the demo.
+                    // N.B: Demo inputs override everything else from here on in.
+                    #if PSYDOOM_MODS
+                        if (!DemoPlayer::readTickInputs())
+                            break;
+                    #else
+                        padBtns = *gpDemo_p;
+                        gTicButtons[gCurPlayerIndex] = padBtns;
+                    #endif
+                }
+                else {
+                    // Demo recording: record pad inputs to the buffer.
+                    // PsyDoom: this logic is now handled by the demo recording module.
+                    #if PSYDOOM_MODS
+                        if (DemoRecorder::isRecording()) {
+                            DemoRecorder::recordTick();
+                        }
+                    #else
+                        *gpDemo_p = padBtns;
+                    #endif
+                }
+
+                // Abort demo recording or playback?
+                exitAction = ga_exitdemo;
+
+                #if PSYDOOM_MODS
+                    // PsyDoom: if pausing while recording then just end recording and allow gameplay to proceed instead of quitting the game
+                    if (gTickInputs[gCurPlayerIndex].fTogglePause()) {
+                        if (gbDemoRecording) {
+                            DemoRecorder::end();
+                            gbDemoRecording = false;
+                            gStatusBar.message = "Recording ended.";
+                            gStatusBar.messageTicsLeft = 30;
+                        } 
+                        else {
+                            gGameAction = ga_exitdemo;
+                            break;
+                        }
+                    }
+                #else
+                    if (padBtns & PAD_START)
+                        break;
+                #endif
+
+                #if PSYDOOM_MODS
+                    // PsyDoom: don't assume the demo playback buffer is a fixed size, this allows us to work with demos of any size.
+                    // Also note that the last tick of the demo does not get executed with this statement, which was the original behavior.
+                    if (gbDemoPlayback && DemoPlayer::hasReachedDemoEnd())
+                        break;
+                #else
+                    // Is the demo recording too big? Are we at the end of the largest possible demo size? If so then stop right now...
+                    const int32_t demoTicksElapsed = (int32_t)(gpDemo_p - gpDemoBuffer);
+
+                    if (demoTicksElapsed >= MAX_DEMO_TICKS)
+                        break;
+                #endif
+            }
+
+            // Advance the number of 1 vblank ticks passed.
+            // N.B: the tick count used here is ALWAYS for player 1, this is how time is kept in sync for a network game.
+            gTicCon += gPlayersElapsedVBlanks[0];
+
+            // Advance to the next game tick if it is time; video refreshes at 60 Hz (NTSC) but the game ticks at 15 Hz (NTSC).
+            // PsyDoom: some tweaks here also to make PAL mode gameplay behave the same as the original game.
+            #if PSYDOOM_MODS
+                const int32_t tgtGameTicCount = (Game::gSettings.bUsePalTimings) ? gTicCon / 3 : d_rshift<VBLANK_TO_TIC_SHIFT>(gTicCon);
+            #else
+                const int32_t tgtGameTicCount = d_rshift<VBLANK_TO_TIC_SHIFT>(gTicCon);
+            #endif
+
+            if (gLastTgtGameTicCount < tgtGameTicCount) {
+                gLastTgtGameTicCount = tgtGameTicCount;
+                gGameTic++;
+
+                // PsyDoom: update the adjustments we make to interpolation for the PAL case (outside of demo timings)
+                #if PSYDOOM_MODS
+                    D_UpdateIsLongGameTick();
+                #endif
+            }
+        }
+
+        // Call the ticker function to do updates for the frame.
+        // Note that I am calling this in all situations, even if the framerate is capped and if we haven't passed enough time for a game tick.
+        // That allows for possible update logic which runs > 30 Hz in future, like framerate uncapped turning movement.
+        exitAction = pTicker();
+
+        if (exitAction != ga_nothing)
+            break;
+
+        // PsyDoom: allow renderer and uncapped framerate toggle and clear input events after the ticker has been called - unless the ticker
+        // has requested that we hold onto them.
+        #if PSYDOOM_MODS
+            if (!gbKeepInputEvents) {
+                Utils::checkForUncappedFramerateToggleInput();
+                Utils::checkForRendererToggleInput();
+                Input::consumeEvents();
+            } else {
+                gbKeepInputEvents = false;  // Temporary request only!
+            }
+
+            // Also check if the app wants to quit; this can happen when the window is closed.
+            if (Input::isQuitRequested()) {
+                exitAction = ga_quitapp;
+                break;
+            }
+        #endif
+
+        // Call the drawer function to do drawing for the frame
+        pDrawer();
+
+        // Do we need to update sound? (sound updates at 15 Hz)
+        // PsyDoom: allow updates at any rate so sounds start as soon as possible.
+        #if PSYDOOM_MODS
+            S_UpdateSounds();
+        #else
+            if (gGameTic > gPrevGameTic) {
+                S_UpdateSounds();
+            }
+        #endif
+
+        gPrevGameTic = gGameTic;
+        gbIsFirstTick = false;
+
+        #if PSYDOOM_MODS
+            // PsyDoom: wrap up timing this frame's duration
+            const frametimer_t::time_point now = frametimer_t::now();
+            gPrevFrameDuration = std::chrono::duration<double>(now - frameStartTime).count();
+            frameStartTime = now;
+
+            // PsyDoom: update frame time profiling if enough time has passed
+            profilerNumFramesElapsed++;
+            const float timeSincePerfUpdate = std::chrono::duration<float>(now - profilerStartTime).count();
+
+            if (timeSincePerfUpdate >= PERF_COUNTER_FREQ) {
+                // Compute and save the performance metrics
+                const frametimer_t::duration elapsedTime = now - profilerStartTime;
+                const std::chrono::microseconds elapsedTimeUsec = std::chrono::duration_cast<std::chrono::microseconds>(elapsedTime);
+
+                const double avgUsec = (double) elapsedTimeUsec.count() / (double) profilerNumFramesElapsed;
+                const double avgElapsedSec = avgUsec / 1000000.0;
+                const double avgFps = (avgElapsedSec > 0.0) ? 1.0 / avgElapsedSec : 999999.0;
+
+                gPerfAvgUsec = (float) avgUsec;
+                gPerfAvgFps = (float) avgFps;
+
+                // Begin a new profiling iteration
+                profilerNumFramesElapsed = 0;
+                profilerStartTime = now;
+            }
+        #endif
+    }
+
+    // PsyDoom: one last sound update before we exit
+    #if PSYDOOM_MODS
+        S_UpdateSounds();
+    #endif
+
+    // Run cleanup logic for this game loop ending
+    pStop(exitAction);
+
+    // PsyDoom: sound update in case the stop action played something
+    #if PSYDOOM_MODS
+        S_UpdateSounds();
+    #endif
+
+    // Current inputs become the old ones
+    #if PSYDOOM_MODS
+        for (uint32_t playerIdx = 0; playerIdx < MAXPLAYERS; ++playerIdx) {
+            gOldTickInputs[playerIdx] = gTickInputs[playerIdx];
+        }
+
+        gOldTicButtons = gTicButtons;
+    #else
+        for (uint32_t playerIdx = 0; playerIdx < MAXPLAYERS; ++playerIdx) {
+            gOldTicButtons[playerIdx] = gTicButtons[playerIdx];
+        }
+    #endif
+
+    // Return the exit game action
+    return exitAction;
+}
+
+#if PSYDOOM_MODS
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Tells if the duration of a game/world tick varies.
+// See the documentation of 'gbIsLongGameTick' for more details.
+//------------------------------------------------------------------------------------------------------------------------------------------
+bool D_GameTickDurationVaries() noexcept {
+    return (Game::gSettings.bUsePalTimings && (!Game::gSettings.bUseDemoTimings));
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Updates whether the current game/world tick is a 'long' duration tick.
+// See the documentation of 'gbIsLongGameTick' for more details.
+//------------------------------------------------------------------------------------------------------------------------------------------
+void D_UpdateIsLongGameTick() noexcept {
+    if (D_GameTickDurationVaries()) {
+        gbIsLongGameTick = (gTicCon % 3 == 0);
+    } else {
+        gbIsLongGameTick = false;
+    }
+}
+#endif  // #if PSYDOOM_MODS

@@ -1,0 +1,25 @@
+# Keep line endings out of the diff.
+#
+# Three of the largest apparent changes against upstream turned out to be whole files rewritten with
+# different line endings, hiding a handful of one-token edits between them - 1899 lines of phantom
+# diff concealing 28 real ones. Anyone comparing this port against upstream needs the comparison to
+# mean something.
+*.cpp   text eol=lf
+*.h     text eol=lf
+*.c     text eol=lf
+*.hpp   text eol=lf
+*.txt   text eol=lf
+*.cmake text eol=lf
+*.md    text eol=lf
+*.sh    text eol=lf
+
+# Except things that genuinely want Windows endings
+*.ps1   text eol=crlf
+*.bat   text eol=crlf
+
+# And things that are not text at all
+*.xbe   binary
+*.zip   binary
+*.png   binary
+*.wav   binary
+*.bin   binary

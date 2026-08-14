@@ -1,0 +1,28 @@
+#pragma once
+
+#include "Doom/doomdef.h"
+
+// PsyDoom: these are now defined in the 'MapInfo' module and can be overriden for new user maps
+#if !PSYDOOM_MODS
+    extern const char gMapNames_Doom[][32];
+    extern const char gMapNames_FinalDoom[][32];
+#endif
+
+#if PSYDOOM_MODS
+    extern bool         gbIntermissionHideNextMap;
+    extern gametype_t   gIntermissionNetGameTypeOverride;
+#endif
+
+void IN_Start() noexcept;
+void IN_Stop([[maybe_unused]] const gameaction_t exitAction) noexcept;
+gameaction_t IN_Ticker() noexcept;
+void IN_Drawer() noexcept;
+
+#if defined(__XBOX__)
+    // Splitscreen: the tally for both players at once, each from their own point of view
+    void IN_DrawerSplit() noexcept;
+#endif
+
+void IN_SingleDrawer() noexcept;
+void IN_CoopDrawer() noexcept;
+void IN_DeathmatchDrawer() noexcept;

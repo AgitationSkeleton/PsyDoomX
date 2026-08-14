@@ -1,0 +1,7 @@
+Note: I have stripped out some stuff which is not needed to use this library.
+The full version is available at the link below.
+
+Version 1.28.0:
+    https://sourceforge.net/projects/asio/files/asio/1.28.0%20(Stable)/asio-1.28.0.zip/download
+    https://sourceforge.net/projects/asio/
+    (April 26th, 2023)

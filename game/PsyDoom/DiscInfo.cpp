@@ -1,0 +1,668 @@
+#include "DiscInfo.h"
+
+#include "FileUtils.h"
+
+#include <algorithm>
+#include <cctype>
+#include <cstdio>
+#include <cstring>
+#if !defined(__XBOX__)
+    #include <regex>
+#endif
+
+#if !defined(__XBOX__)
+// Use case insensitive matching for all regexes and use ECMAScript
+static constexpr auto REGEX_OPTIONS = std::regex_constants::ECMAScript | std::regex_constants::icase;
+
+// Regexes for matching the beginning of a command
+static const std::regex gRegexCmdBeg_File = std::regex(R"(^FILE\b)", REGEX_OPTIONS);
+static const std::regex gRegexCmdBeg_Track = std::regex(R"(^TRACK\b)", REGEX_OPTIONS);
+static const std::regex gRegexCmdBeg_Index = std::regex(R"(^INDEX\b)", REGEX_OPTIONS);
+static const std::regex gRegexCmdBeg_Pregap = std::regex(R"(^PREGAP\b)", REGEX_OPTIONS);
+static const std::regex gRegexCmdBeg_Postgap = std::regex(R"(^POSTGAP\b)", REGEX_OPTIONS);
+
+// Regexes for parsing the individual bits of each command
+static const std::regex gRegexCmd_File = std::regex(R"(FILE\s+\"(.*?)\"\s+BINARY\s*$)", REGEX_OPTIONS);
+static const std::regex gRegexCmd_Track = std::regex(R"(TRACK\s+(\d+)\s+(.*?)\s*$)", REGEX_OPTIONS);
+static const std::regex gRegexCmd_Index = std::regex(R"(INDEX\s+(\d+)\s+(\d+)\s*:\s*(\d+)\s*:\s*(\d+)\s*$)", REGEX_OPTIONS);
+
+// Regexes for track modes
+static const std::regex gRegex_TrackMode_1_2048 = std::regex(R"(\s*MODE\s*1\s*/\s*2048\s*)", REGEX_OPTIONS);
+static const std::regex gRegex_TrackMode_2_2048 = std::regex(R"(\s*MODE\s*2\s*/\s*2048\s*)", REGEX_OPTIONS);
+static const std::regex gRegex_TrackMode_1_2352 = std::regex(R"(\s*MODE\s*1\s*/\s*2352\s*)", REGEX_OPTIONS);
+static const std::regex gRegex_TrackMode_2_2352 = std::regex(R"(\s*MODE\s*2\s*/\s*2352\s*)", REGEX_OPTIONS);
+static const std::regex gRegex_TrackMode_2_2336 = std::regex(R"(\s*MODE\s*2\s*/\s*2336\s*)", REGEX_OPTIONS);
+static const std::regex gRegex_TrackMode_2_2324 = std::regex(R"(\s*MODE\s*2\s*/\s*2324\s*)", REGEX_OPTIONS);
+static const std::regex gRegex_TrackMode_Audio = std::regex(R"(\s*AUDIO\s*)", REGEX_OPTIONS);
+#endif  // !defined(__XBOX__)
+
+// Current parsing context for the .cue file parser
+struct CueParseCtx {
+    DiscInfo&       disc;           // The disc to save the results to
+    const char*     cueBasePath;    // Path to which paths in the .cue file are relative: should include a trailing path separator if specified
+    std::string     file;           // File to read the current track data from
+    int32_t         fileSize;       // Total size in bytes of the file pointed to by 'file'
+    std::string     line;           // The current .cue line
+    std::string     errorMsg;       // Error message if something went wrong
+};
+
+static bool isNewline(const char c) noexcept {
+    return ((c == '\r') || (c == '\n') || (c == '\v') || (c == '\f'));
+}
+
+static bool isSpace(const char c) noexcept {
+    return ((c == ' ') || (c == '\t') || (c == '\v') || (c == '\f'));
+}
+
+static bool isNewlineOrSpace(const char c) noexcept {
+    return (isNewline(c) || isSpace(c));
+}
+
+static const char* skipNewlinesAndSpace(const char* str) {
+    for (char c = *str; c != 0; c = *++str) {
+        if (!isNewlineOrSpace(c))
+            break;
+    }
+
+    return str;
+}
+
+static const char* findNextNewline(const char* str) {
+    for (char c = *str; c != 0; c = *++str) {
+        if (isNewline(c))
+            break;
+    }
+
+    return str;
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Parse a 'FILE' command. E.G: FILE "Final Doom.img" BINARY
+//------------------------------------------------------------------------------------------------------------------------------------------
+static bool parseCueCmd_File(CueParseCtx& ctx) noexcept {
+#if defined(__XBOX__)
+    // Xbox: extract filename between the first pair of double-quotes (no std::regex)
+    const char* const src = ctx.line.c_str();
+    const char* q1 = std::strchr(src, '"');
+    const char* q2 = q1 ? std::strchr(q1 + 1, '"') : nullptr;
+
+    if (!q1 || !q2 || q2 <= q1 + 1) {
+        ctx.errorMsg = "Invalid 'FILE' command format: ";
+        ctx.errorMsg += ctx.line;
+        ctx.errorMsg += "\nExpected: FILE \"<PATH_TO_FILE>\" BINARY";
+        return false;
+    }
+
+    ctx.file = ctx.cueBasePath;
+    ctx.file.append(q1 + 1, (size_t)(q2 - q1 - 1));
+    ctx.fileSize = (int32_t) FileUtils::getFileSize(ctx.file.c_str());
+
+    if (ctx.fileSize < 0) {
+        if (!FileUtils::fileExists(ctx.file.c_str())) {
+            ctx.errorMsg = "File specified by 'FILE' command does not exist: ";
+            ctx.errorMsg += ctx.line;
+            return false;
+        } else {
+            ctx.errorMsg = "Invalid/unreadable file specified by a 'FILE' command - couldn't determine the file's size! Command was: ";
+            ctx.errorMsg += ctx.line;
+            return false;
+        }
+    }
+
+    return true;
+#else
+    std::smatch matches;
+    std::regex_search(ctx.line, matches, gRegexCmd_File);
+
+    if (matches.size() != 2) {
+        ctx.errorMsg = "Invalid 'FILE' command format: ";
+        ctx.errorMsg += ctx.line;
+        ctx.errorMsg += "\nExpected: FILE \"<PATH_TO_FILE>\" BINARY";
+        return false;
+    }
+
+    ctx.file = ctx.cueBasePath;     // Note: should already include a trailing path separator if not empty (i.e base path is specified)
+    ctx.file += matches[1].str();
+    ctx.fileSize = (int32_t) FileUtils::getFileSize(ctx.file.c_str());
+
+    if (ctx.fileSize < 0) {
+        if (!FileUtils::fileExists(ctx.file.c_str())) {
+            // This is probably the most likely error to happen: use a more specific message
+            ctx.errorMsg = "File specified by 'FILE' command does not exist: ";
+            ctx.errorMsg += ctx.line;
+            return false;
+        } else {
+            ctx.errorMsg = "Invalid/unreadable file specified by a 'FILE' command - couldn't determine the file's size! Command was: ";
+            ctx.errorMsg += ctx.line;
+            return false;
+        }
+    }
+
+    return true;
+#endif  // defined(__XBOX__)
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Parse a 'TRACK' command. E.G: TRACK 1 MODE2/2352
+//------------------------------------------------------------------------------------------------------------------------------------------
+static bool parseCueCmd_Track(CueParseCtx& ctx) noexcept {
+#if defined(__XBOX__)
+    // Xbox: skip the keyword, then sscanf the remaining tokens - avoids %*s which pdclib doesn't support
+    int trackNum = 0;
+    char modeStr[64] = {};
+
+    // Skip past the TRACK keyword and any following whitespace
+    const char* p = ctx.line.c_str();
+    while (*p && !std::isspace((unsigned char)*p)) ++p;  // skip "TRACK"
+    while (*p &&  std::isspace((unsigned char)*p)) ++p;  // skip whitespace
+
+    // TRACK <num> <mode>
+    if (std::sscanf(p, "%d %63s", &trackNum, modeStr) != 2) {
+        ctx.errorMsg = "Invalid 'TRACK' command format: ";
+        ctx.errorMsg += ctx.line;
+        ctx.errorMsg += "\nExpected: TRACK <TRACK_NUMBER> <MODE/FORMAT>";
+        return false;
+    }
+
+    // There must be a file specified for the track
+    if (ctx.file.empty()) {
+        ctx.errorMsg = "'TRACK' command specified but no 'FILE' command specified before that! Track data file not defined.";
+        return false;
+    }
+
+    // Uppercase the mode string for comparison
+    for (char* p = modeStr; *p; ++p) { *p = (char)std::toupper((unsigned char)*p); }
+
+    // Fill in the basic track details
+    DiscTrack& track = ctx.disc.tracks.emplace_back();
+    track.sourceFilePath = ctx.file;
+    track.sourceFileTotalSize = ctx.fileSize;
+    track.trackNum = trackNum;
+    track.fileOffset = -1;
+    track.blockCount = -1;
+    track.index0 = -1;
+    track.index1 = 1;
+
+    // Set block parameters based on mode string
+    if (std::strcmp(modeStr, "MODE1/2048") == 0 || std::strcmp(modeStr, "MODE2/2048") == 0) {
+        track.bIsData = true;
+        track.blockSize = 2048;
+        track.blockPayloadOffset = 0;
+        track.blockPayloadSize = 2048;
+    }
+    else if (std::strcmp(modeStr, "MODE1/2352") == 0) {
+        track.bIsData = true;
+        track.blockSize = 2352;
+        track.blockPayloadOffset = 16;
+        track.blockPayloadSize = 2048;
+    }
+    else if (std::strcmp(modeStr, "MODE2/2352") == 0) {
+        track.bIsData = true;
+        track.blockSize = 2352;
+        track.blockPayloadOffset = 24;
+        track.blockPayloadSize = 2048;
+    }
+    else if (std::strcmp(modeStr, "MODE2/2336") == 0) {
+        track.bIsData = true;
+        track.blockSize = 2352;
+        track.blockPayloadOffset = 8;
+        track.blockPayloadSize = 2048;
+    }
+    else if (std::strcmp(modeStr, "MODE2/2324") == 0) {
+        track.bIsData = true;
+        track.blockSize = 2352;
+        track.blockPayloadOffset = 24;
+        track.blockPayloadSize = 2324;
+    }
+    else if (std::strcmp(modeStr, "AUDIO") == 0) {
+        track.bIsData = false;
+        track.blockSize = 2352;
+        track.blockPayloadOffset = 0;
+        track.blockPayloadSize = 2352;
+    }
+    else {
+        ctx.errorMsg = "Track mode not supported: ";
+        ctx.errorMsg += modeStr;
+        ctx.disc.tracks.pop_back();
+        return false;
+    }
+
+    return true;
+#else
+    // Make sure the command is formatted validly
+    std::smatch matches;
+    std::regex_search(ctx.line, matches, gRegexCmd_Track);
+
+    if (matches.size() != 3) {
+        ctx.errorMsg = "Invalid 'TRACK' command format: ";
+        ctx.errorMsg += ctx.line;
+        ctx.errorMsg += "\nExpected: TRACK <TRACK_NUMBER> <MODE/FORMAT>";
+        return false;
+    }
+
+    // There must be a file specified for the track
+    if (ctx.file.empty()) {
+        ctx.errorMsg = "'TRACK' command specified but no 'FILE' command specified before that! Track data file not defined.";
+        return false;
+    }
+
+    // Fill in the basic track details
+    DiscTrack& track = ctx.disc.tracks.emplace_back();
+    track.sourceFilePath = ctx.file;
+    track.sourceFileTotalSize = ctx.fileSize;
+
+    try {
+        track.trackNum = std::stoi(matches[1]);
+    } catch (...) {
+        ctx.errorMsg = "Invalid track number: ";
+        ctx.errorMsg += matches[1];
+        return false;
+    }
+
+    // These track details are not known yet
+    track.fileOffset = -1;
+    track.blockCount = -1;
+    track.index0 = -1;
+    track.index1 = 1;
+
+    // Get the track mode uppercased
+    std::string mode = matches[2];
+    std::for_each(mode.c_str(), mode.c_str() + mode.size(), ::toupper);
+
+    // Set these block/track parameters based on the mode.
+    // See 'Bin2ISO : https://gist.github.com/ceritium/139577' for more details on some of these.
+    if (std::regex_search(mode, gRegex_TrackMode_1_2048) || std::regex_search(mode, gRegex_TrackMode_2_2048)) {
+        track.bIsData = true;
+        track.blockSize = 2048;
+        track.blockPayloadOffset = 0;
+        track.blockPayloadSize = 2048;
+    }
+    else if (std::regex_search(mode, gRegex_TrackMode_1_2352)) {
+        track.bIsData = true;
+        track.blockSize = 2352;
+        track.blockPayloadOffset = 16;
+        track.blockPayloadSize = 2048;
+    }
+    else if (std::regex_search(mode, gRegex_TrackMode_2_2352)) {
+        track.bIsData = true;
+        track.blockSize = 2352;
+        track.blockPayloadOffset = 24;
+        track.blockPayloadSize = 2048;
+    }
+    else if (std::regex_search(mode, gRegex_TrackMode_2_2336)) {
+        track.bIsData = true;
+        track.blockSize = 2352;
+        track.blockPayloadOffset = 8;
+        track.blockPayloadSize = 2048;
+    }
+    else if (std::regex_search(mode, gRegex_TrackMode_2_2324)) {
+        track.bIsData = true;
+        track.blockSize = 2352;
+        track.blockPayloadOffset = 24;
+        track.blockPayloadSize = 2324;
+    }
+    else if (std::regex_search(mode, gRegex_TrackMode_Audio)) {
+        track.bIsData = false;
+        track.blockSize = 2352;
+        track.blockPayloadOffset = 0;
+        track.blockPayloadSize = 2352;
+    }
+    else {
+        ctx.errorMsg = "Track mode not supported: ";
+        ctx.errorMsg += mode;
+        return false;
+    }
+
+    return true;
+#endif  // defined(__XBOX__)
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Parse a 'INDEX' command. E.G: INDEX 0 05:01:39
+//------------------------------------------------------------------------------------------------------------------------------------------
+static bool parseCueCmd_Index(CueParseCtx& ctx) noexcept {
+    // There must be a valid track to have an index
+    if (ctx.disc.tracks.empty()) {
+        ctx.errorMsg = "'INDEX' command issued without there being a track defined beforehand!";
+        return false;
+    }
+
+#if defined(__XBOX__)
+    // Xbox: skip the keyword, then sscanf remaining tokens - avoids %*s which pdclib doesn't support
+    int indexNum = 0, mm = 0, ss = 0, ff = 0;
+
+    // Skip past the INDEX keyword and following whitespace
+    const char* p = ctx.line.c_str();
+    while (*p && !std::isspace((unsigned char)*p)) ++p;  // skip "INDEX"
+    while (*p &&  std::isspace((unsigned char)*p)) ++p;  // skip whitespace
+
+    if (std::sscanf(p, "%d %d:%d:%d", &indexNum, &mm, &ss, &ff) != 4) {
+        ctx.errorMsg = "Invalid 'INDEX' command format: ";
+        ctx.errorMsg += ctx.line;
+        ctx.errorMsg += "\nExpected: INDEX <INDEX_NUMBER> <MIN>:<SEC>:<FRAME>";
+        return false;
+    }
+
+    {
+        const DiscPos discPos = { mm, ss, ff };
+        const int32_t indexLba = discPos.toLba();
+        DiscTrack& track = ctx.disc.tracks.back();
+        if (indexNum == 0) {
+            track.index0 = indexLba;
+        } else if (indexNum == 1) {
+            track.index1 = indexLba;
+        }
+    }
+
+    return true;
+#else
+    // Make sure the command is formatted validly
+    std::smatch matches;
+    std::regex_search(ctx.line, matches, gRegexCmd_Index);
+
+    if (matches.size() != 5) {
+        ctx.errorMsg = "Invalid 'INDEX' command format: ";
+        ctx.errorMsg += ctx.line;
+        ctx.errorMsg += "\nExpected: INDEX <INDEX_NUMBER> <MIN>:<SEC>:<FRAME>";
+        return false;
+    }
+
+    try {
+        // Get the index we are dealing with
+        const int32_t indexNum = std::stoi(matches[1]);
+
+        // Figure out which sector/lba this index refers to
+        const int32_t min = std::stoi(matches[2]);
+        const int32_t sec = std::stoi(matches[3]);
+        const int32_t frame = std::stoi(matches[4]);
+
+        const DiscPos discPos = { min, sec, frame };
+        const int32_t indexLba = discPos.toLba();
+
+        // Populate the track data
+        DiscTrack& track = ctx.disc.tracks.back();
+
+        if (indexNum == 0) {
+            track.index0 = indexLba;
+        } else if (indexNum == 1) {
+            track.index1 = indexLba;
+        }
+    }
+    catch (...) {
+        ctx.errorMsg = "Failed to parse the index, minute, second or frame for an INDEX command. Command was: ";
+        ctx.errorMsg += ctx.line;
+    }
+
+    return true;
+#endif  // defined(__XBOX__)
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Parse a single line in the .cue file: each command is restricted to one line
+//------------------------------------------------------------------------------------------------------------------------------------------
+#if defined(__XBOX__)
+// Xbox: check if a trimmed line starts with a keyword followed by end-of-string or non-alpha
+static bool lineStartsWithKeyword(const std::string& line, const char* keyword) noexcept {
+    const size_t kwLen = std::strlen(keyword);
+    if (line.size() < kwLen) { return false; }
+    for (size_t i = 0; i < kwLen; ++i) {
+        if (std::toupper((unsigned char)line[i]) != (unsigned char)keyword[i]) { return false; }
+    }
+    // Must be followed by end-of-string or a non-alphanumeric character (word boundary)
+    return (line.size() == kwLen) || !std::isalnum((unsigned char)line[kwLen]);
+}
+#endif
+
+static bool parseCueLine(CueParseCtx& ctx) noexcept {
+#if defined(__XBOX__)
+    // Xbox: keyword prefix matching, no std::regex
+    // Note: unsupported command lines or 'REM' lines are simply ignored
+    if (lineStartsWithKeyword(ctx.line, "FILE")) {
+        return parseCueCmd_File(ctx);
+    }
+    else if (lineStartsWithKeyword(ctx.line, "TRACK")) {
+        return parseCueCmd_Track(ctx);
+    }
+    else if (lineStartsWithKeyword(ctx.line, "INDEX")) {
+        return parseCueCmd_Index(ctx);
+    }
+    // PREGAP, POSTGAP — ignored (gap data is all zeros and PsyDoom doesn't need it)
+    return true;
+#else
+    // Note: unsupported command lines or 'REM' lines are simply ignored
+    if (std::regex_search(ctx.line, gRegexCmdBeg_File)) {
+        return parseCueCmd_File(ctx);
+    }
+    else if (std::regex_search(ctx.line, gRegexCmdBeg_Track)) {
+        return parseCueCmd_Track(ctx);
+    }
+    else if (std::regex_search(ctx.line, gRegexCmdBeg_Index)) {
+        return parseCueCmd_Index(ctx);
+    }
+    else if (std::regex_search(ctx.line, gRegexCmdBeg_Pregap)) {
+        // Ignore pregap commands... From what I've read online the data for these gaps is never ripped anyway, because it's all 0s.
+        // PsyDoom also doesn't need this gap.
+        return true;
+    }
+    else if (std::regex_search(ctx.line, gRegexCmdBeg_Postgap)) {
+        // Ignore postgap commands... From what I've read online the data for these gaps is never ripped anyway, because it's all 0s.
+        // PsyDoom also doesn't need this gap.
+        return true;
+    }
+
+    return true;
+#endif  // defined(__XBOX__)
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Parses all of the entries in the .cue file and does nothing else (no information inferrence)
+//------------------------------------------------------------------------------------------------------------------------------------------
+static bool parseCue(DiscInfo& disc, const char* const str, const char* const cueBasePath, std::string& errorMsg) noexcept {
+    // Parse the .cue line by line
+    CueParseCtx ctx = { disc };
+    ctx.cueBasePath = cueBasePath;
+    ctx.line.reserve(256);
+
+    const char* const strEnd = str + std::strlen(str);
+    const char* lineBeg = skipNewlinesAndSpace(str);
+
+    while (lineBeg < strEnd) {
+        // Figure out the line end and parse the entire line
+        const char* const lineEnd = findNextNewline(lineBeg + 1);
+        ctx.line.assign(lineBeg, lineEnd);
+
+        if (!parseCueLine(ctx)) {
+            errorMsg = std::move(ctx.errorMsg);
+            return false;
+        }
+
+        lineBeg = skipNewlinesAndSpace(lineEnd);
+    }
+
+    return true;
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Infer missing or not explicitly specified information in the .cue file.
+// Note: this function assumes the track list has been sorted before calling.
+//------------------------------------------------------------------------------------------------------------------------------------------
+static void inferMissingCueInfo(DiscInfo& disc) noexcept {
+    // Infer index 1 (data start) for the first track as the beginning of the file if not specified
+    if (disc.tracks.size() > 0) {
+        DiscTrack& firstTrack = disc.tracks[0];
+
+        if (firstTrack.index1 < 0) {
+            firstTrack.index1 = 0;
+        }
+    }
+
+    // Infer missing index 0 (pre-gap start) for all tracks as being the same as index 1.
+    // This means a zero sized pre-gap or no pre-gap.
+    for (DiscTrack& track : disc.tracks) {
+        if (track.index0 < 0) {
+            track.index0 = track.index1;
+        }
+    }
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Determine the file offsets and sizes (in blocks) for each track.
+// Also validates the offsets and sizes and returns 'false' if that validation fails.
+//------------------------------------------------------------------------------------------------------------------------------------------
+static bool determineTrackOffsetsAndSizes(DiscInfo& disc, std::string& errorMsg) noexcept {
+    // Validate firstly that index '1' is defined for all tracks.
+    // Note that if index 1 is defined, index 0 is also guaranteed to be defined.
+    for (DiscTrack& track : disc.tracks) {
+        if (track.index1 < 0) {
+            errorMsg = "Track number ";
+            errorMsg += std::to_string(track.trackNum);
+            errorMsg += " does NOT define INDEX 1! Can't tell where the track data starts as a result.";
+            return false;
+        }
+    }
+
+    // Validate that the indexes for all the tracks are in range
+    for (DiscTrack& track : disc.tracks) {
+        const int64_t fileSizeInBlocks = track.sourceFileTotalSize / track.blockSize;
+
+        // Show INDEX 1 errors first because oftentimes INDEX 0 is inferred from INDEX 1.
+        // Error messages might be more relevant if we do this.
+        if ((track.index1 < 0) || (track.index1 > fileSizeInBlocks)) {
+            errorMsg = "Track number ";
+            errorMsg += std::to_string(track.trackNum);
+            errorMsg += " has an invalid INDEX 1 which falls outside of the track's data file!\nINDEX 1 sector index = ";
+            errorMsg += std::to_string(track.index1);
+            errorMsg += "; Track data file size (in sectors) = ";
+            errorMsg += std::to_string(fileSizeInBlocks);
+            return false;
+        }
+
+        if ((track.index0 < 0) || (track.index0 > fileSizeInBlocks)) {
+            errorMsg = "Track number ";
+            errorMsg += std::to_string(track.trackNum);
+            errorMsg += " has an invalid INDEX 0 which falls outside of the track's data file!\nINDEX 0 sector index = ";
+            errorMsg += std::to_string(track.index0);
+            errorMsg += "; Track data file size (in sectors) = ";
+            errorMsg += std::to_string(fileSizeInBlocks);
+            return false;
+        }
+    }
+
+    // Determine the file offset and size for each track
+    for (size_t i = 0; i < disc.tracks.size(); ++i) {
+        // Offset is where 'index 1' starts:
+        DiscTrack& track = disc.tracks[i];
+        track.fileOffset = track.index1 * track.blockSize;
+
+        // End of track marker is where 'index 0' for the next track in the same file starts.
+        // If there is no such track, then we instead make it the end of the file:
+        int32_t endLba = (int32_t)(track.sourceFileTotalSize / track.blockSize);
+
+        for (size_t j = i + 1; j < disc.tracks.size(); ++j) {
+            DiscTrack& otherTrack = disc.tracks[j];
+
+            if (track.sourceFilePath == otherTrack.sourceFilePath) {
+                endLba = otherTrack.index0;
+                break;
+            }
+        }
+
+        track.blockCount = endLba - track.index1;
+        track.trackPhysicalSize = track.blockCount * track.blockSize;
+        track.trackPayloadSize = track.blockCount * track.blockPayloadSize;
+    }
+
+    return true;
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Get a particular track in the disc
+//------------------------------------------------------------------------------------------------------------------------------------------
+DiscTrack* DiscInfo::getTrack(int32_t trackNum) noexcept {
+    for (DiscTrack& track : tracks) {
+        if (track.trackNum == trackNum)
+            return &track;
+    }
+
+    return nullptr;
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Get a particular track in the disc
+//------------------------------------------------------------------------------------------------------------------------------------------
+const DiscTrack* DiscInfo::getTrack(int32_t trackNum) const noexcept {
+    for (const DiscTrack& track : tracks) {
+        if (track.trackNum == trackNum)
+            return &track;
+    }
+
+    return nullptr;
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Parse the .cue from the given string
+//------------------------------------------------------------------------------------------------------------------------------------------
+bool DiscInfo::parseFromCueStr(const char* const str, const char* const cueBasePath, std::string& errorMsg) noexcept {
+    // Clear the current track list and parse the .cue firstly
+    tracks.clear();
+
+    if (!parseCue(*this, str, cueBasePath, errorMsg))
+        return false;
+
+    // Ensure the tracks are in sorted track number order for the .cue
+    std::sort(
+        tracks.begin(),
+        tracks.end(),
+        [](const DiscTrack& t1, const DiscTrack& t2) noexcept { return (t1.trackNum < t2.trackNum); }
+    );
+
+    // Infer various .cue information that wasn't explicitly specified
+    inferMissingCueInfo(*this);
+
+    // Determine the file offset and size of each track's data
+    if (!determineTrackOffsetsAndSizes(*this, errorMsg))
+        return false;
+
+    // All good if we've reached here!
+    return true;
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Parse the .cue from the given file; if there is an error 'false' is returned and an error message potentially set
+//------------------------------------------------------------------------------------------------------------------------------------------
+bool DiscInfo::parseFromCueFile(const char* const filePath, std::string& errorMsg) noexcept {
+    // Note: all paths specified in the .cue file will be relative to the .cue file itself.
+    // Determine that base folder to which all paths are relative to here:
+    std::string cueBasePath;
+    FileUtils::getParentPath(filePath, cueBasePath);
+
+    // Read the entire .cue file into ram and parse its contents
+    FileData cueFile = FileUtils::getContentsOfFile(filePath, 8, std::byte(0));
+
+    if (cueFile.bytes.get()) {
+        return parseFromCueStr((char*) cueFile.bytes.get(), cueBasePath.c_str(), errorMsg);
+    } else {
+        errorMsg = "Failed to open/read the .cue file '";
+        errorMsg += filePath;
+        errorMsg += "'";
+
+        return false;
+    }
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Returns what track a particular CD-ROM sector on the disc belongs to.
+// Returns '-1' if the sector does not belong to any track.
+//------------------------------------------------------------------------------------------------------------------------------------------
+int32_t DiscInfo::getSectorTrack(const uint32_t sectorIdx) noexcept {
+    uint32_t trackEndSector = 0;
+
+    for (const DiscTrack& track : tracks) {
+        trackEndSector += (uint32_t) track.blockCount;
+
+        if (sectorIdx < trackEndSector)
+            return track.trackNum;
+    }
+
+    return -1;
+}

@@ -1,0 +1,24 @@
+# Output folders that some toolchains like to use.
+#
+# Note the trailing wildcard: this used to say 'build' alone, which matched nothing here because the
+# directories are 'build-xbox' and 'build_nxdk'. 549 build artifacts were being tracked as a result,
+# 43 MB of them, and every build made a commit full of changed object files.
+build
+build*/
+*.obj
+*.xbe
+
+# QTCreator user project file
+/CMakeLists.txt.user*
+CMakeSettings.json
+
+# Visual Studio Files
+.vs/
+.dccache
+# Relay session logs and build noise
+logs/xbox/
+relay_build.log
+
+# Development leftovers that must not reach a public repo
+logs/
+*.log

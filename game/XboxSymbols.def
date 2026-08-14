@@ -1,0 +1,12 @@
+; Xbox Runtime Symbol Definitions
+; This .def file provides wrapper symbols for the C++ runtime functions
+; that nxdk doesn't include, allowing successful linkage on Xbox
+
+EXPORTS
+    ___std_terminate
+    ___CxxFrameHandler3
+    __CxxThrowException@8
+    __RTDynamicCast
+    atof
+    strtof
+    strtod

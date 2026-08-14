@@ -1,0 +1,452 @@
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Display setup and manipulation
+//------------------------------------------------------------------------------------------------------------------------------------------
+#include "Video.h"
+
+#include "Asserts.h"
+#include "Config/Config.h"
+#include "Gpu.h"
+#include "ProgArgs.h"
+#include "PsxVm.h"
+#include "Utils.h"
+#if defined(__XBOX__)
+    #include "XboxDiag.h"
+#endif
+#include "VideoBackend_SDL.h"
+#if PSYDOOM_VULKAN_RENDERER
+#include "VideoBackend_Vulkan.h"
+#include "Vulkan/VRenderer.h"
+#endif
+
+#include <algorithm>
+#include <cstdint>
+#include <SDL.h>
+
+#if defined(__XBOX__)
+    #include <hal/debug.h>
+    #include <windows.h>
+    #include <cstring>
+    static void videoStep(const char* msg) noexcept {
+        debugPrint("[VIDEO] %s\n", msg);
+        HANDLE h = CreateFileA("E:\\Apps\\PsyDoomX\\bootlog.txt",
+            FILE_APPEND_DATA, FILE_SHARE_READ, nullptr,
+            OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h != INVALID_HANDLE_VALUE) {
+            DWORD w = 0;
+            WriteFile(h, "[VIDEO] ", 8, &w, nullptr);
+            WriteFile(h, msg, (DWORD)strlen(msg), &w, nullptr);
+            WriteFile(h, "\r\n", 2, &w, nullptr);
+            CloseHandle(h);
+        }
+    }
+    #define VIDEO_STEP(msg) videoStep(msg)
+#else
+    #define VIDEO_STEP(msg) ((void)0)
+#endif
+
+BEGIN_NAMESPACE(Video)
+
+// Standard SDL video backend that only supports the classic renderer
+static VideoBackend_SDL gVideoBackend_SDL;
+
+#if PSYDOOM_VULKAN_RENDERER
+    // Vulkan video backend that can do the classic renderer plus a new hardware accelerated Vulkan renderer
+    static VideoBackend_Vulkan gVideoBackend_Vulkan;
+#endif
+
+// Pointer to the video backend implementation in use
+static IVideoBackend* gpVideoBackend;
+
+SDL_Window*     gpSdlWindow;    // The SDL window being used
+BackendType     gBackendType;   // Which type of video backend is in use
+int32_t         gTopOverscan;   // Sanitized config input: number of pixels to discard at the top of the screen in terms of the original 256x240 framebuffer
+int32_t         gBotOverscan;   // Sanitized config input: number of pixels to discard at the bottom of the screen in terms of the original 256x240 framebuffer
+
+#ifdef __linux__
+    // Linux only: an icon to use for the window (raw data)
+    #include "Resources/Linux/icon_64.raw_rgb888.c"
+
+    // Linux only: an icon to use for the window (SDL)
+    SDL_Surface* gpSdlWindowIcon;
+#endif
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Utility: determines which display to run PsyDoom on
+//------------------------------------------------------------------------------------------------------------------------------------------
+static uint8_t pickStartupDisplay() noexcept {
+    // How many displays are there?
+    // Note: if an error occurs (negative return value) then just assume 1; also clamp the display count to a sane amount.
+    const int numDisplays = std::clamp(SDL_GetNumVideoDisplays(), 1, 256);
+
+    // If a valid display is specified manually then just use that:
+    if ((Config::gOutputDisplayIndex >= 0) && (Config::gOutputDisplayIndex < numDisplays))
+        return (uint8_t) Config::gOutputDisplayIndex;
+
+    // Get the current mouse position and determine the display index from that.
+    // Note: if an error occurs determining the display (negative return value) then just default to the first display.
+    SDL_Point mousePos = {};
+    SDL_GetGlobalMouseState(&mousePos.x, &mousePos.y);
+
+#if defined(__XBOX__)
+    return 0;
+#else
+    return (uint8_t) std::clamp(SDL_GetPointDisplayIndex(&mousePos), 0, numDisplays - 1);
+#endif
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Pick which resolution to use for the game's window on startup
+//------------------------------------------------------------------------------------------------------------------------------------------
+static void decideStartupResolution(const uint8_t displayIndex, int32_t& w, int32_t& h) noexcept {
+    // Get the screen resolution.
+    // On high DPI screens like MacOS retina the resolution returned will be virtual not physical resolution.
+    SDL_DisplayMode displayMode;
+
+    if (SDL_GetCurrentDisplayMode(displayIndex, &displayMode) != 0) {
+        FatalErrors::raise("Failed to determine current screen video mode!");
+    }
+
+    // Determine automatically decided resolution
+    int32_t autoResolutionW = {};
+    int32_t autoResolutionH = {};
+
+    if (Config::gbFullscreen) {
+        // If in fullscreen then use the current screen resolution
+        autoResolutionW = displayMode.w;
+        autoResolutionH = displayMode.h;
+    }
+    else {
+        // In windowed mode make the window a multiple of the logical display resolution.
+        // Also allow some room for window edges and other OS decoration...
+        // If a free aspect ratio is being used (width <= 0) then just use the original display resolution width for this calculation.
+        const float logicalDispW = (Config::gLogicalDisplayW <= 0.0f) ? (float) ORIG_DISP_RES_X : Config::gLogicalDisplayW;
+
+        const float xScale = std::max(((float) displayMode.w - 20.0f) / logicalDispW, 1.0f);
+        const float yScale = std::max(((float) displayMode.h - 40.0f) / (float) ORIG_DISP_RES_Y, 1.0f);
+        const int32_t scale = std::max((int32_t) std::min(xScale, yScale), 1);
+
+        autoResolutionW = (int32_t)(logicalDispW * scale);
+        autoResolutionH = (int32_t)((float) ORIG_DISP_RES_Y * scale);
+    }
+
+    // Save the actual resolution to use, taking into account user overrides
+    w = (Config::gOutputResolutionW > 0) ? Config::gOutputResolutionW : autoResolutionW;
+    h = (Config::gOutputResolutionH > 0) ? Config::gOutputResolutionH : autoResolutionH;
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Utility: determines which video backend to use (requires a window to do so)
+//------------------------------------------------------------------------------------------------------------------------------------------
+static void determineVideoBackend() noexcept {
+    #if PSYDOOM_VULKAN_RENDERER
+        if ((!Config::gbDisableVulkanRenderer) && VideoBackend_Vulkan::isBackendSupported()) {
+            gpVideoBackend = &gVideoBackend_Vulkan;
+            gBackendType = BackendType::Vulkan;
+            return;
+        }
+    #endif
+
+    gpVideoBackend = &gVideoBackend_SDL;
+    gBackendType = BackendType::SDL;
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Utility: determines the SDL window creation flags
+//------------------------------------------------------------------------------------------------------------------------------------------
+static Uint32 getSdlWindowCreateFlags() noexcept {
+    ASSERT(gpVideoBackend);
+
+#if defined(__XBOX__)
+    // On Xbox: keep it simple - just SHOWN plus the backend flags (SDL_WINDOW_SHOWN).
+    // Mouse/grab/focus flags are irrelevant on Xbox and some crash nxdk SDL.
+    return SDL_WINDOW_SHOWN | gpVideoBackend->getSdlWindowCreateFlags();
+#else
+    Uint32 windowCreateFlags = (
+        SDL_WINDOW_MOUSE_FOCUS |
+        SDL_WINDOW_INPUT_FOCUS |
+        SDL_WINDOW_INPUT_GRABBED |
+        SDL_WINDOW_MOUSE_CAPTURE
+    );
+
+    if (Config::gbFullscreen) {
+        windowCreateFlags |= (Config::gbExclusiveFullscreenMode) ? SDL_WINDOW_FULLSCREEN : SDL_WINDOW_FULLSCREEN_DESKTOP;
+    } else {
+        windowCreateFlags |= SDL_WINDOW_RESIZABLE;
+    }
+
+    windowCreateFlags |= gpVideoBackend->getSdlWindowCreateFlags();
+    return windowCreateFlags;
+#endif
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Sets up the renderering API and creates the main game window
+//------------------------------------------------------------------------------------------------------------------------------------------
+void initVideo() noexcept {
+    // Ignore call in headless mode
+    if (ProgArgs::gbHeadlessMode)
+        return;
+
+    // Initialize SDL subsystems and determine the video backend (one must always be chosen)
+    // On Xbox: the SDL video subsystem and window are created only once per process.
+    // nxdk cannot re-create the D3D8 device after SDL_QuitSubSystem(VIDEO), so we reuse
+    // the existing window on subsequent game launches within the same session.
+#if defined(__XBOX__)
+    // Always determine the video backend first (getSdlWindowCreateFlags requires gpVideoBackend).
+    VIDEO_STEP("determineVideoBackend");
+    determineVideoBackend();
+    ASSERT(gpVideoBackend);
+
+    if (!gpSdlWindow) {
+        VIDEO_STEP("SDL_InitSubSystem VIDEO");
+        if (SDL_InitSubSystem(SDL_INIT_VIDEO) != 0) {
+            FatalErrors::raise("Unable to initialize SDL!");
+        }
+
+        // Set and sanitize overscan settings
+        gTopOverscan = std::clamp(Config::gTopOverscanPixels, 0, ORIG_DRAW_RES_Y / 2 - 1);
+        gBotOverscan = std::clamp(Config::gBottomOverscanPixels, 0, ORIG_DRAW_RES_Y / 2 - 1);
+
+        // Xbox: always 640x480 fullscreen - no need to query display modes
+        VIDEO_STEP("SDL_CreateWindow");
+        gpSdlWindow = SDL_CreateWindow(
+            Utils::getGameVersionString(),
+            SDL_WINDOWPOS_UNDEFINED,
+            SDL_WINDOWPOS_UNDEFINED,
+            640,
+            480,
+            getSdlWindowCreateFlags()
+        );
+
+        if (!gpSdlWindow)
+            FatalErrors::raise("Unable to create a window!");
+    } else {
+        // Window already alive from previous launch; just refresh overscan settings.
+        gTopOverscan = std::clamp(Config::gTopOverscanPixels, 0, ORIG_DRAW_RES_Y / 2 - 1);
+        gBotOverscan = std::clamp(Config::gBottomOverscanPixels, 0, ORIG_DRAW_RES_Y / 2 - 1);
+    }
+
+    VIDEO_STEP("initRenderers");
+    gpVideoBackend->initRenderers(gpSdlWindow);
+    VIDEO_STEP("initRenderers done");
+#else
+    // Set and sanitize overscan settings
+    gTopOverscan = std::clamp(Config::gTopOverscanPixels, 0, ORIG_DRAW_RES_Y / 2 - 1);
+    gBotOverscan = std::clamp(Config::gBottomOverscanPixels, 0, ORIG_DRAW_RES_Y / 2 - 1);
+
+    // Decide what display to use
+    const uint8_t displayIndex = pickStartupDisplay();
+
+    // Decide what window size to use
+    int32_t winSizeX = 0;
+    int32_t winSizeY = 0;
+    decideStartupResolution(displayIndex, winSizeX, winSizeY);
+
+    // Linux: create the icon for the window
+    #ifdef __linux__
+        gpSdlWindowIcon = SDL_CreateRGBSurfaceWithFormatFrom((void*) gIcon_64_raw_rgb888, 64, 64, 24, 64 * 3, SDL_PIXELFORMAT_RGB24);
+    #endif
+
+    // Create the window
+    VIDEO_STEP("SDL_CreateWindow");
+    gpSdlWindow = SDL_CreateWindow(
+        Utils::getGameVersionString(),
+        SDL_WINDOWPOS_CENTERED_DISPLAY(displayIndex),
+        SDL_WINDOWPOS_CENTERED_DISPLAY(displayIndex),
+        winSizeX,
+        winSizeY,
+        getSdlWindowCreateFlags()
+    );
+
+    if (!gpSdlWindow)
+        FatalErrors::raise("Unable to create a window!");
+
+    // Linux: set the icon for the window
+    #ifdef __linux__
+        if (gpSdlWindowIcon) {
+            SDL_SetWindowIcon(gpSdlWindow, gpSdlWindowIcon);
+        }
+    #endif
+
+    // Initialize the video backend
+    VIDEO_STEP("determineVideoBackend");
+    determineVideoBackend();
+    ASSERT(gpVideoBackend);
+    VIDEO_STEP("initRenderers");
+    gpVideoBackend->initRenderers(gpSdlWindow);
+    VIDEO_STEP("initRenderers done");
+
+    // Hide the cursor and switch to relative input mode
+    SDL_ShowCursor(SDL_DISABLE);
+    SDL_SetWindowInputFocus(gpSdlWindow);
+    SDL_WarpMouseInWindow(gpSdlWindow, winSizeX / 2, winSizeY / 2);
+    SDL_SetRelativeMouseMode(SDL_TRUE);
+#endif  // !defined(__XBOX__)
+    VIDEO_STEP("initVideo done");
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Destroys the main game window and tears down rendering APIs.
+// On Xbox: the SDL window is kept alive between game launches because nxdk cannot re-create
+// the D3D8 device; only the video backend (renderer) is torn down and re-created each time.
+//------------------------------------------------------------------------------------------------------------------------------------------
+void shutdownVideo() noexcept {
+    // Ignore call in headless mode
+    if (ProgArgs::gbHeadlessMode)
+        return;
+
+    // Turn off relative mouse mode and unhide the cursor (not applicable on Xbox)
+#if !defined(__XBOX__)
+    SDL_SetRelativeMouseMode(SDL_FALSE);
+    SDL_ShowCursor(SDL_ENABLE);
+#endif
+
+    // Cleanup for the video backend (always done, even on Xbox)
+    if (gpVideoBackend) {
+        gpVideoBackend->destroyRenderers();
+        gpVideoBackend = nullptr;
+    }
+
+    gBackendType = {};
+
+    // On Xbox: preserve the window and SDL_VIDEO subsystem between launches.
+    // Destroying and re-creating them causes SDL_CreateWindow to fail (D3D8 device is gone).
+#if !defined(__XBOX__)
+    if (gpSdlWindow) {
+        SDL_SetWindowGrab(gpSdlWindow, SDL_FALSE);
+        SDL_DestroyWindow(gpSdlWindow);
+        gpSdlWindow = nullptr;
+    }
+
+    #ifdef __linux__
+        if (gpSdlWindowIcon) {
+            SDL_FreeSurface(gpSdlWindowIcon);
+            gpSdlWindowIcon = nullptr;
+        }
+    #endif
+
+    SDL_QuitSubSystem(SDL_INIT_VIDEO);
+#endif  // !defined(__XBOX__)
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Returns the current window size in pixels (NOT points!)
+//------------------------------------------------------------------------------------------------------------------------------------------
+void getWindowSizeInPixels(uint32_t& width, uint32_t& height) noexcept {
+    // Get the SDL renderer associated with the window and from that get the pixel size
+    SDL_Renderer* const pRenderer = (gpSdlWindow) ? SDL_GetRenderer(gpSdlWindow) : nullptr;
+    int sdlWidth = 0;
+    int sdlHeight = 0;
+
+    if (pRenderer) {
+        SDL_GetRendererOutputSize(pRenderer, &sdlWidth, &sdlHeight);
+    }
+
+    width = sdlWidth;
+    height = sdlHeight;
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// This function determines where in the window the framebuffer for the classic PSX renderer should be output to.
+// Considers the current window size (specified in pixels) and user scaling settings.
+//------------------------------------------------------------------------------------------------------------------------------------------
+void getClassicFramebufferWindowRect(
+    const float windowW,
+    const float windowH,
+    float& rectX,
+    float& rectY,
+    float& rectW,
+    float& rectH
+) noexcept {
+    //If the window size is zero then make the output rect zero also
+    if ((windowW <= 0) || (windowH <= 0)) {
+        rectX = 0;
+        rectY = 0;
+        rectW = 0;
+        rectH = 0;
+        return;
+    }
+
+    // Are we using a free aspect ratio mode, specified by using a logical display width of <= 0?
+    // If so then just stretch the output image in any way to fill the window.
+    if (Config::gLogicalDisplayW <= 0.0f) {
+        rectX = 0;
+        rectY = 0;
+        rectW = windowW;
+        rectH = windowH;
+    } else {
+        // If not using a free aspect ratio then determine the scale to output at, while preserving the chosen aspect ratio.
+        // The chosen aspect ratio is determined by the user's logical display resolution width.
+        const float logicalXResolution = Config::gLogicalDisplayW;
+        const float xScale = windowW / logicalXResolution;
+        const float yScale = windowH / (float) ORIG_DISP_RES_Y;
+        const float scale = std::min(xScale, yScale);
+
+        // Determine output width and height and center the framebuffer image in the window
+        rectW = logicalXResolution * scale;
+        rectH = (float) ORIG_DISP_RES_Y * scale;
+        rectX = (windowW - rectW) * 0.5f;
+        rectY = (windowH - rectH) * 0.5f;
+    }
+
+    // Ensure the coordinates are within screen bounds.
+    // Note that rectX, rectY could technically go past screen bounds if the width or height is '0', but we shouldn't draw in that case.
+    rectX = std::clamp(rectX, 0.0f, windowW);
+    rectY = std::clamp(rectY, 0.0f, windowH);
+
+    if (rectX + rectW > windowW) {
+        rectW = windowW - rectX;
+    }
+
+    if (rectY + rectH > windowH) {
+        rectH = windowH - rectY;
+    }
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Display the currently renderered PSX GPU frame to the screen; this is used by the classic renderer
+//------------------------------------------------------------------------------------------------------------------------------------------
+void displayFramebuffer() noexcept {
+    // Ignore call in headless mode otherwise handle and ensure the window is updated after we do the swap
+    if (ProgArgs::gbHeadlessMode)
+        return;
+
+    gpVideoBackend->displayFramebuffer();
+
+    // Roll the texture cache counters over: one frame has just gone on screen.
+    //
+    // Here rather than at 'I_IncDrawnFrameCount', which splitscreen calls once per view - counting from that would
+    // report half a frame's work and hide exactly the case these counters exist to measure.
+    #if defined(__XBOX__)
+        XboxDiag::endTexFrame();
+    #endif
+
+    Utils::doPlatformUpdates();
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Helper: tells if any of the render paths used by the new Vulkan renderer are currently in use.
+// Note: will return 'false' if we are using a Vulkan backend but just outputting the classic PSX renderer via Vulkan.
+//------------------------------------------------------------------------------------------------------------------------------------------
+bool isUsingVulkanRenderPath() noexcept {
+    #if PSYDOOM_VULKAN_RENDERER
+        if (gBackendType == BackendType::Vulkan)
+            return (!VRenderer::isUsingPsxRenderPath());    // Anything other than the PSX render path is to do with the new Vulkan renderer
+    #endif
+
+    return false;
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Returns the currently active video backend
+//------------------------------------------------------------------------------------------------------------------------------------------
+IVideoBackend& getCurrentBackend() noexcept {
+    #if PSYDOOM_VULKAN_RENDERER
+        if (gBackendType == BackendType::Vulkan)
+            return gVideoBackend_Vulkan;
+    #endif
+
+    return gVideoBackend_SDL;
+}
+
+END_NAMESPACE(Video)

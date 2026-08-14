@@ -1,0 +1,86 @@
+name: Build XBE
+
+# Every push and pull request gets built so a break is caught where it happened. Pushing a tag that
+# looks like a version also cuts a release and attaches the executable to it.
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    # The toolchain image the nxdk project publishes. Building nxdk from source in the job works too but
+    # takes several minutes every time and pins nothing; this is the same toolchain for every build.
+    container:
+      image: ghcr.io/xboxdev/nxdk:latest
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0      # So 'git describe' can find the tag to stamp into the binary
+
+      - name: Work out the build id
+        id: buildid
+        shell: bash
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "id=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "id=${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Configure
+        shell: bash
+        run: |
+          # Optimisation is set explicitly: the nxdk toolchain leaves CMAKE_CXX_FLAGS_RELEASE empty, so
+          # asking for a Release build alone does not guarantee a -O flag actually reaches the compiler.
+          cmake -S . -B build-xbox -G "Unix Makefiles" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS_RELEASE="-O2 -DNDEBUG" \
+            -DCMAKE_CXX_FLAGS_RELEASE="-O2 -DNDEBUG" \
+            -DCMAKE_TOOLCHAIN_FILE="${NXDK_DIR}/share/toolchain-nxdk.cmake" \
+            -DPSYDOOM_XBOX_BUILD_ID="${{ steps.buildid.outputs.id }}" \
+            -DPSYDOOM_INCLUDE_VULKAN_RENDERER=OFF \
+            -DPSYDOOM_INCLUDE_LAUNCHER=OFF \
+            -DPSYDOOM_INCLUDE_AUDIO_TOOLS=OFF \
+            -DPSYDOOM_INCLUDE_OTHER_TOOLS=OFF \
+            -DPSYDOOM_INCLUDE_OLD_CODE=OFF
+
+      - name: Build
+        shell: bash
+        run: cmake --build build-xbox --target PsyDoom -j "$(nproc)"
+
+      - name: Check the executable was produced
+        shell: bash
+        run: |
+          # A build that succeeds without producing an XBE has failed at something the exit code did not
+          # report, and an empty release asset is worse than a failed job.
+          test -s build-xbox/game/default.xbe
+          ls -l build-xbox/game/default.xbe
+          md5sum build-xbox/game/default.xbe
+
+      - name: Upload the build
+        uses: actions/upload-artifact@v4
+        with:
+          name: PsyDoomX-${{ steps.buildid.outputs.id }}
+          path: build-xbox/game/default.xbe
+          if-no-files-found: error
+
+      - name: Attach it to the release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build-xbox/game/default.xbe
+          generate_release_notes: true
+          body: |
+            Put `default.xbe` in `E:\Apps\PsyDoomX\` on the console, alongside a folder for each game
+            you own - see the README for the layout.
+
+            No game data is included. You need your own disc images.
