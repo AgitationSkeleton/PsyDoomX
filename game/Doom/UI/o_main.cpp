@@ -102,6 +102,25 @@ static const menuitem_t gOptMenuItems_Single[] = {
     { opt_restart,          62, 205 },
 };
 
+#if defined(__XBOX__)
+// Splitscreen: everything the single player menu has, except saving and loading.
+//
+// Splitscreen was given the full menu so that controls and the extra options were reachable - the cut down network menu
+// drops both, which makes sense between two consoles and not between two pads on one. But the full menu also carries
+// 'Load And Save', and that has no business being in a multiplayer game: a save holds one player's game, and loading
+// one out from under a splitscreen session is not something the rest of the code is prepared for.
+//
+// A list of its own rather than a flag on the single player one, so the rows below close the gap up instead of leaving
+// a hole where saving used to be.
+static const menuitem_t gOptMenuItems_Splitscreen[] = {
+    { opt_music,            62, 50  },
+    { opt_sound,            62, 90  },
+    { opt_extra_options,    62, 130 },
+    { opt_main_menu,        62, 155 },
+    { opt_restart,          62, 180 },
+};
+#endif
+
 static const menuitem_t gOptMenuItems_NetGame[] = {
     { opt_music,        62, 70  },
     { opt_sound,        62, 110 },
@@ -171,6 +190,12 @@ void O_Init() noexcept {
         gpOptionsMenuItems = gOptMenuItems_NetGame;
         gOptionsMenuSize = C_ARRAY_SIZE(gOptMenuItems_NetGame);
     }
+#if defined(__XBOX__)
+    else if (Splitscreen::isActive() && gbGamePaused) {
+        gpOptionsMenuItems = gOptMenuItems_Splitscreen;
+        gOptionsMenuSize = C_ARRAY_SIZE(gOptMenuItems_Splitscreen);
+    }
+#endif
     else if (gbGamePaused) {
         gpOptionsMenuItems = gOptMenuItems_Single;
         gOptionsMenuSize = C_ARRAY_SIZE(gOptMenuItems_Single);
@@ -387,6 +412,16 @@ gameaction_t O_Control() noexcept {
         #if PSYDOOM_MODS
             case opt_load:
             case opt_load_save: {
+                // Refused outright in a multiplayer game, not merely left off the menu.
+                //
+                // A save holds one player's game; loading one part way through a two player session is not something
+                // the code below is prepared for. The menu it sits on is chosen elsewhere and could be got wrong again,
+                // so this does not depend on that choice being right.
+                #if defined(__XBOX__)
+                    if (gNetGame != gt_single)
+                        break;
+                #endif
+
                 // Note: disable this menu for the demo version of the game
                 if (bMenuOk && (!Game::gbIsDemoVersion)) {
                     const gameaction_t action = MiniLoop(SaveRoot_Init, SaveRoot_Shutdown, SaveRoot_Update, SaveRoot_Draw);

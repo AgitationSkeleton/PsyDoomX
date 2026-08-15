@@ -166,6 +166,15 @@ void XOptions_Init() noexcept {
 //------------------------------------------------------------------------------------------------------------------------------------------
 void XOptions_Shutdown([[maybe_unused]] const gameaction_t exitAction) noexcept {
     gCursorPos[gCurPlayerIndex] = 0;
+
+    // Write the settings out on the way out.
+    //
+    // The rows that step one value at a time save as they change, which is what makes them survive a console being
+    // switched off rather than quit. Turn speed cannot do that: it moves every tick while the direction is held, and
+    // saving each step would be hundreds of writes to drag the slider across. Leaving the menu is the natural moment.
+    #if defined(__XBOX__)
+        PlayerPrefs::save();
+    #endif
 }
 
 //------------------------------------------------------------------------------------------------------------------------------------------
@@ -302,10 +311,12 @@ gameaction_t XOptions_Update() noexcept {
         case menu_stat_display: {
             if (bMenuLeft && (!oldInputs.fMenuLeft()) && (PlayerPrefs::gStatDisplayMode[gCurPlayerIndex] > StatDisplayMode::None)) {
                 PlayerPrefs::gStatDisplayMode[gCurPlayerIndex] = (StatDisplayMode)((int32_t) PlayerPrefs::gStatDisplayMode[gCurPlayerIndex] - 1);
+                PlayerPrefs::save();
                 S_StartSound(nullptr, sfx_swtchx);
             }
             else if (bMenuRight && (!oldInputs.fMenuRight()) && (PlayerPrefs::gStatDisplayMode[gCurPlayerIndex] < StatDisplayMode::KillsSecretsAndItems)) {
                 PlayerPrefs::gStatDisplayMode[gCurPlayerIndex] = (StatDisplayMode)((int32_t) PlayerPrefs::gStatDisplayMode[gCurPlayerIndex] + 1);
+                PlayerPrefs::save();
                 S_StartSound(nullptr, sfx_swtchx);
             }
         }   break;

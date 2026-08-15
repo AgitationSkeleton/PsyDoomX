@@ -26,6 +26,7 @@
 #include "p_spec.h"
 #include "p_tick.h"
 #include "PsyDoom/Config/Config.h"
+#include "Finally.h"
 #include "PsyDoom/Controls.h"
 #include "PsyDoom/DemoPlayer.h"
 #include "PsyDoom/Game.h"
@@ -1187,6 +1188,28 @@ void P_PlayerInitTurning() noexcept {
 // We now allow turning at any point in time and without any interpolation, to reduce input lag.
 //------------------------------------------------------------------------------------------------------------------------------------------
 void P_PlayerDoTurning(const int32_t playerIdx) noexcept {
+    // Read this player's controls, not whoever was last made active.
+    //
+    // 'Controls::getFloat' has no player argument: it looks up 'gBindings[gActivePlayer]'. The active player is set to
+    // one while player two's inputs are gathered and put back to zero straight afterwards, so by the time this runs it
+    // is always zero - and the analog turn below was read from player one's stick for BOTH players. Player one turning
+    // turned player two as well.
+    //
+    // The digital turn above it was never affected, because that reads 'gTickInputs[playerIdx]' and is indexed
+    // properly. Only the paths that go through 'Controls' by way of the active player had the problem, which is why
+    // player two could still turn with their own stick and be shoved about by player one's at the same time.
+    //
+    // Set for the whole function and put back on the way out, so anything else in here that consults 'Controls' gets
+    // the same player rather than only the one call that was noticed.
+    #if defined(__XBOX__)
+        const uint8_t xbSavedActivePlayer = Controls::getActivePlayer();
+        Controls::setActivePlayer((uint8_t) playerIdx);
+
+        const auto xbRestoreActivePlayer = finally([=]() noexcept {
+            Controls::setActivePlayer(xbSavedActivePlayer);
+        });
+    #endif
+
     const time_point_t now = std::chrono::high_resolution_clock::now();
     const player_t& player = gPlayers[playerIdx];
     const bool bFinalDoomMovementMode = Game::gSettings.bUseFinalDoomPlayerMovement;

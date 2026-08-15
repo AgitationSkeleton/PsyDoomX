@@ -662,55 +662,60 @@ void ST_Drawer() noexcept {
         I_DrawNumber(225, 204, player.frags);
     }
 
+    // Xbox: the player's colour, in the recess the face sits in, during a multiplayer game.
+    //
+    // PC Doom does this with a patch per colour - 'STFB0' to 'STFB3', drawn only when 'netgame' - and PSX Doom has
+    // no such lumps, so the square is drawn rather than loaded. Same idea though: a player who has chosen a colour
+    // can see on their own status bar which one they are.
+    //
+    // Drawn before the face and OUTSIDE the test for it. The gibbing animation ends by switching the face off -
+    // there is no head left to draw - and this used to sit inside that test, so the colour went out with the head
+    // on the last frame of the explosion and never came back. It stopped needing the face for its position when
+    // the rectangle was fixed, so it no longer waits on one either.
+    //
+    // Only in multiplayer, and only when there is a colour to show: a green square behind every single player game
+    // would be a change to a screen nobody asked to have changed.
+    #if defined(__XBOX__)
+        if (gNetGame != gt_single) {
+            const PlayerColour::Colour colour = PlayerColour::forPlayer(gCurPlayerIndex);
+
+            if (colour != PlayerColour::GREEN) {
+                uint8_t r = 0, g = 0, b = 0;
+                PlayerColour::statusBarRgb(colour, r, g, b);
+
+                // Where the backing goes, in the status bar's own coordinates.
+                //
+                // Stated outright rather than worked out as margins around the face, which is what put the first
+                // attempt's top edge at screen y 199 - one row above the bar, inside the 3D view. The face can also
+                // change size between expressions, and the backing should not breathe with it.
+                //
+                // These numbers were drawn by hand over the exported plate and measured back off it; the plate and
+                // the working files are in 'extras/statusbar_mpcolors'. The bar is 256x40 drawn at screen (0,200),
+                // so bar y plus 200 is screen y. Inclusive pixel range x 115..140, y 1..30; the far edges below are
+                // one past that because the polygon does not draw its last column or row.
+                static constexpr int16_t BAR_SCREEN_Y = 200;
+                static constexpr int16_t FILL_X0 = 115;
+                static constexpr int16_t FILL_X1 = 141;
+                static constexpr int16_t FILL_Y0 = 1;
+                static constexpr int16_t FILL_Y1 = 31;
+
+                const int16_t x0 = FILL_X0;
+                const int16_t y0 = (int16_t)(BAR_SCREEN_Y + FILL_Y0);
+                const int16_t x1 = FILL_X1;
+                const int16_t y1 = (int16_t)(BAR_SCREEN_Y + FILL_Y1);
+
+                POLY_F4 quad = {};
+                LIBGPU_SetPolyF4(quad);
+                LIBGPU_setRGB0(quad, r, g, b);
+                LIBGPU_setXY4(quad, x0, y0, x1, y0, x0, y1, x1, y1);
+                I_AddPrim(quad);
+            }
+        }
+    #endif
+
     // Draw the doomguy face if enabled
     if (gbDrawSBFace) {
         const facesprite_t& sprite = *gpCurSBFaceSprite;
-
-        // Xbox: the player's colour, behind their own face, in a multiplayer game.
-        //
-        // PC Doom does this with a patch per colour - 'STFB0' to 'STFB3', drawn only when 'netgame' - and PSX Doom has
-        // no such lumps, so the square is drawn rather than loaded. Same idea though: a player who has chosen a colour
-        // can see on their own status bar which one they are.
-        //
-        // Only in multiplayer, and only when there is a colour to show: a green square behind every single player game
-        // would be a change to a screen nobody asked to have changed.
-        #if defined(__XBOX__)
-            if (gNetGame != gt_single) {
-                const PlayerColour::Colour colour = PlayerColour::forPlayer(gCurPlayerIndex);
-
-                if (colour != PlayerColour::GREEN) {
-                    uint8_t r = 0, g = 0, b = 0;
-                    PlayerColour::statusBarRgb(colour, r, g, b);
-
-                    // Where the backing goes, in the status bar's own coordinates.
-                    //
-                    // Stated outright rather than worked out as margins around the face, which is what put the first
-                    // attempt's top edge at screen y 199 - one row above the bar, inside the 3D view. The face can also
-                    // change size between expressions, and the backing should not breathe with it.
-                    //
-                    // These numbers were drawn by hand over the exported plate and measured back off it; the plate and
-                    // the working files are in 'extras/statusbar_mpcolors'. The bar is 256x40 drawn at screen (0,200),
-                    // so bar y plus 200 is screen y. Inclusive pixel range x 115..140, y 1..30; the far edges below are
-                    // one past that because the polygon does not draw its last column or row.
-                    static constexpr int16_t BAR_SCREEN_Y = 200;
-                    static constexpr int16_t FILL_X0 = 115;
-                    static constexpr int16_t FILL_X1 = 141;
-                    static constexpr int16_t FILL_Y0 = 1;
-                    static constexpr int16_t FILL_Y1 = 31;
-
-                    const int16_t x0 = FILL_X0;
-                    const int16_t y0 = (int16_t)(BAR_SCREEN_Y + FILL_Y0);
-                    const int16_t x1 = FILL_X1;
-                    const int16_t y1 = (int16_t)(BAR_SCREEN_Y + FILL_Y1);
-
-                    POLY_F4 quad = {};
-                    LIBGPU_SetPolyF4(quad);
-                    LIBGPU_setRGB0(quad, r, g, b);
-                    LIBGPU_setXY4(quad, x0, y0, x1, y0, x0, y1, x1, y1);
-                    I_AddPrim(quad);
-                }
-            }
-        #endif
 
         LIBGPU_setXY0(spritePrim, sprite.xPos, sprite.yPos);
         LIBGPU_setUV0(spritePrim, sprite.texU, sprite.texV);
@@ -721,6 +726,14 @@ void ST_Drawer() noexcept {
 
     // PsyDoom: draw level stats if enabled, or frags if playing deathmatch:
     #if PSYDOOM_MODS
+        // Where the stat readout starts, and how far apart its lines are.
+        //
+        // It began two pixels from the top and had its first row clipped, in single player and in splitscreen alike.
+        // Named here rather than repeated at each call so the three rows cannot drift apart from each other, and so
+        // moving the block is one number rather than four.
+        constexpr int32_t STATS_TOP = 6;
+        constexpr int32_t STATS_LINE_H = 8;
+
         const bool bShowStats = (PlayerPrefs::gStatDisplayMode[gCurPlayerIndex] >= StatDisplayMode::Kills);
 
         if (bShowStats) {
@@ -741,18 +754,18 @@ void ST_Drawer() noexcept {
 
             // Show the stats!
             if (gNetGame != gt_deathmatch) {
-                ST_DrawRightAlignedStat(2 + widescreenAdjust, 2, 'K', jointKillCount, gTotalKills);
+                ST_DrawRightAlignedStat(2 + widescreenAdjust, STATS_TOP, 'K', jointKillCount, gTotalKills);
 
                 if (PlayerPrefs::gStatDisplayMode[gCurPlayerIndex] >= StatDisplayMode::KillsAndSecrets) {
-                    ST_DrawRightAlignedStat(2 + widescreenAdjust, 10, 'S', jointSecretCount, gTotalSecret);
+                    ST_DrawRightAlignedStat(2 + widescreenAdjust, STATS_TOP + STATS_LINE_H, 'S', jointSecretCount, gTotalSecret);
                 }
 
                 if (PlayerPrefs::gStatDisplayMode[gCurPlayerIndex] >= StatDisplayMode::KillsSecretsAndItems) {
-                    ST_DrawRightAlignedStat(2 + widescreenAdjust, 18, 'I', jointItemCount, gTotalItems);
+                    ST_DrawRightAlignedStat(2 + widescreenAdjust, STATS_TOP + STATS_LINE_H * 2, 'I', jointItemCount, gTotalItems);
                 }
             } else {
                 // Show frags for deathmatch
-                ST_DrawRightAlignedStat(2 + widescreenAdjust, 2, 'F', gPlayers[gCurPlayerIndex].frags, gPlayers[gCurPlayerIndex ^ 1].frags);
+                ST_DrawRightAlignedStat(2 + widescreenAdjust, STATS_TOP, 'F', gPlayers[gCurPlayerIndex].frags, gPlayers[gCurPlayerIndex ^ 1].frags);
             }
         }
     #endif  // #if PSYDOOM_MODS
