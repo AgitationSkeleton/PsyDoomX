@@ -93,8 +93,18 @@ jobs:
           eval "$(./bin/activate -s)"
           make NXDK_ONLY=y -j "$(nproc)"
 
-      - name: Check nxdk produced its toolchain file
-        run: test -f nxdk/share/toolchain-nxdk.cmake
+          # And the tool that makes an XBE out of the linked executable.
+          #
+          # 'NXDK_ONLY=y' sets the target to 'main.exe' and stops there; cxbe is a dependency of the
+          # XBE rule, not of that, so it never gets built. The game compiled and linked in full before
+          # failing on this - the very last step of the build.
+          make cxbe
+
+      - name: Check nxdk produced what the build needs
+        run: |
+          test -f nxdk/share/toolchain-nxdk.cmake
+          # Checked here rather than discovered at the end of a ten minute compile
+          ls -l nxdk/tools/cxbe/cxbe*
 
       - name: Work out the build id
         id: buildid

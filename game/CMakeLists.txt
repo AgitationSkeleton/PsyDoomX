@@ -701,11 +701,26 @@ endif()
 # Xbox: always regenerate default.xbe from the just-linked executable.
 # This avoids stale XBE artifacts when only PsyDoom.exe is rebuilt.
 if (PLATFORM_XBOX)
+    # Find the tool that turns the linked executable into an XBE.
+    #
+    # nxdk's own Makefile calls it 'cxbe'; on Windows the toolchain builds it as 'cxbe.exe'. This asked
+    # for the Windows name outright, which works there and fails everywhere else with nothing more
+    # useful than "not found" - the build compiles and links in full and then falls over on its last
+    # step. Asking for whichever one is present costs a line and works on both.
+    find_program(NXDK_CXBE
+        NAMES cxbe cxbe.exe
+        HINTS "$ENV{NXDK_DIR}/tools/cxbe"
+        NO_DEFAULT_PATH
+        REQUIRED
+    )
+
+    message(STATUS "PsyDoom Xbox: cxbe is ${NXDK_CXBE}")
+
     add_custom_command(
         TARGET ${GAME_TGT_NAME} POST_BUILD
         COMMENT "Generate default.xbe from PsyDoom.exe"
         WORKING_DIRECTORY "$<TARGET_FILE_DIR:${GAME_TGT_NAME}>"
-        COMMAND "$ENV{NXDK_DIR}/tools/cxbe/cxbe.exe"
+        COMMAND "${NXDK_CXBE}"
             -OUT:default.xbe
             -TITLE:"PsyDoom"
             -MODE:retail
