@@ -993,7 +993,24 @@ void M_Drawer() noexcept {
         // PsyDoom: use a more flexible drawing method that can accomodate any number of digits.
         #if PSYDOOM_MODS
             char levelNumStr[64];
-            std::snprintf(levelNumStr, C_ARRAY_SIZE(levelNumStr), "Level %d", gStartMapOrEpisode);
+
+            // Xbox: name the map as well as numbering it, if the launcher asked for that.
+            //
+            // 'MAP24: Hell Beneath' rather than 'Level 24'. The name is the one MAPINFO gives, so it is whatever the
+            // running game calls that map rather than a table kept here that could disagree with it.
+            #if defined(__XBOX__)
+                if (Game::gbUseNamedLevels) {
+                    std::snprintf(
+                        levelNumStr, C_ARRAY_SIZE(levelNumStr), "MAP%02d: %s",
+                        gStartMapOrEpisode, Game::getMapName(gStartMapOrEpisode).c_str().data()
+                    );
+                } else {
+                    std::snprintf(levelNumStr, C_ARRAY_SIZE(levelNumStr), "Level %d", gStartMapOrEpisode);
+                }
+            #else
+                std::snprintf(levelNumStr, C_ARRAY_SIZE(levelNumStr), "Level %d", gStartMapOrEpisode);
+            #endif
+
             I_DrawString(74, levelY, levelNumStr);
         #else
             I_DrawString(74, levelY, "Level");

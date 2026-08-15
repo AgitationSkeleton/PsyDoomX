@@ -17,6 +17,8 @@ You bring your own game disc. Nothing from a retail game ships here.
   player, and it changes in your hands.
 - **Player colours**, the way PC Doom does them - green, indigo, brown and red - so two marines can be
   told apart. Per player, and it follows the body.
+- **Named levels**, optionally. The cooperative and deathmatch level select can read `MAP24: Hell
+  Beneath` rather than `Level 24`, using each game's own map names.
 - Per player turn speed, autorun and stat display, and an on screen frame rate readout.
 
 ## What you need
@@ -58,7 +60,11 @@ option.
 | Back | Automap |
 | Start | Pause |
 
-Bindings, turn speed and autorun are under **Options → Extra Options**.
+Bindings, turn speed and autorun are under **Options → Extra Options**. Player colour and super
+shotgun style are there too, in a multiplayer game.
+
+The launcher itself has settings for the frame rate readout, the menu style, and whether levels are
+named or numbered. They are remembered between runs.
 
 ## Building
 

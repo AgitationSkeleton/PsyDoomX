@@ -45,6 +45,15 @@ void getClassicDemoGameSettings(GameSettings& settings) noexcept;
 int32_t getNumMaps() noexcept;
 int32_t getNumRegularMaps() noexcept;
 const String32& getMapName(const int32_t mapNum) noexcept;
+
+#if defined(__XBOX__)
+    // Name the maps in the cooperative and deathmatch level select, rather than numbering them.
+    //
+    // 'Level 24' says nothing about where you are about to play; 'MAP24: Hell Beneath' does. Set by the launcher from
+    // its own setting before the game starts, so it applies to whichever game is launched without either of them
+    // having to agree on a config file. Off by default, which leaves the menu exactly as it was.
+    extern bool gbUseNamedLevels;
+#endif
 int32_t getNumEpisodes() noexcept;
 const String32& getEpisodeName(const int32_t episodeNum) noexcept;
 int32_t getEpisodeStartMap(const int32_t episodeNum) noexcept;

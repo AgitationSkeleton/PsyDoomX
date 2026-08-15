@@ -317,6 +317,10 @@ int32_t getNumRegularMaps() noexcept {
 //------------------------------------------------------------------------------------------------------------------------------------------
 // Get the name of the specified map number
 //------------------------------------------------------------------------------------------------------------------------------------------
+#if defined(__XBOX__)
+    bool gbUseNamedLevels = false;
+#endif
+
 const String32& getMapName(const int32_t mapNum) noexcept {
     const MapInfo::Map* const pMap = MapInfo::getMap(mapNum);
     return (pMap) ? pMap->name : UNKNOWN_MAP_NAME;

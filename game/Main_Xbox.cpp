@@ -1,5 +1,6 @@
 #include "Doom/psx_main.h"
 #include "FatalErrors.h"
+#include "PsyDoom/Game.h"
 #include "PsyDoom/LauncherAssets.h"
 #include "PsyDoom/LauncherAudio.h"
 #include "PsyDoom/SsgStyle.h"
@@ -177,6 +178,21 @@ enum OverlayMode : int32_t {
     OVERLAY_MODE_COUNT
 };
 
+// Whether the cooperative and deathmatch level select names its maps or just numbers them.
+//
+// 'Level 24' says nothing about where you are about to play; 'MAP24: Hell Beneath' does. The name comes from the
+// running game's own MAPINFO, so each game says what it calls that map rather than this having a table of its own.
+enum LevelNameMode : int32_t {
+    LEVELNAMES_VANILLA = 0,     // As the game shipped
+    LEVELNAMES_NAMED,
+    LEVELNAMES_MODE_COUNT
+};
+
+static const char* const kLevelNameModeNames[LEVELNAMES_MODE_COUNT] = {
+    "Vanilla",
+    "Named"
+};
+
 static const char* const kOverlayModeNames[OVERLAY_MODE_COUNT] = {
     "Off",
     "On",
@@ -189,7 +205,8 @@ struct LaunchPayload {
     uint32_t    action;
     int32_t     edition;
     int32_t     overlayMode;
-    uint8_t     reserved[3072 - (sizeof(uint32_t) * 2) - (sizeof(int32_t) * 2)];
+    int32_t     levelNameMode;
+    uint8_t     reserved[3072 - (sizeof(uint32_t) * 2) - (sizeof(int32_t) * 3)];
 };
 
 static_assert(sizeof(LaunchPayload) == 3072, "The launch payload must fill the launch data page exactly");
@@ -203,6 +220,7 @@ static LaunchPayload gLaunchPayload;
 static constexpr const char* kSettingsPath = "E:\\Apps\\PsyDoomX\\launcher.ini";
 
 static int32_t gOverlayMode = OVERLAY_OFF;
+static int32_t gLevelNameMode = LEVELNAMES_VANILLA;
 
 // Which look the menu wears: an edition index, or SIMPLE for the plain text one it started as.
 //
@@ -221,6 +239,7 @@ static const char* menuStyleName(const int32_t style) noexcept {
 
 static void loadSettings() noexcept {
     gOverlayMode = OVERLAY_OFF;
+    gLevelNameMode = LEVELNAMES_VANILLA;
 
     HANDLE const h = CreateFileA(kSettingsPath, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
 
@@ -238,6 +257,16 @@ static void loadSettings() noexcept {
 
             if ((value >= 0) && (value < OVERLAY_MODE_COUNT)) {
                 gOverlayMode = value;
+            }
+        }
+
+        const char* const pLevelNames = std::strstr(buf, "levelnames=");
+
+        if (pLevelNames) {
+            const int32_t value = std::atoi(pLevelNames + 11);
+
+            if ((value >= 0) && (value < LEVELNAMES_MODE_COUNT)) {
+                gLevelNameMode = value;
             }
         }
 
@@ -267,7 +296,10 @@ static void saveSettings() noexcept {
     // menu style was read back from a line that was never there and fell to its default on every boot. The two are
     // written together now so the reader and the writer cannot disagree about what the file holds.
     char buf[96] = {};
-    const int len = std::snprintf(buf, sizeof(buf), "overlay=%d\r\nstyle=%d\r\n", (int) gOverlayMode, (int) gMenuStyle);
+    const int len = std::snprintf(
+        buf, sizeof(buf), "overlay=%d\r\nstyle=%d\r\nlevelnames=%d\r\n",
+        (int) gOverlayMode, (int) gMenuStyle, (int) gLevelNameMode
+    );
 
     if (len > 0) {
         DWORD written = 0;
@@ -311,9 +343,10 @@ static void startAudioForStyle() noexcept {
 // Kept as a row rather than a button of its own, so that everything the menu can do is visible in the list instead of
 // having to be known about beforehand.
 static constexpr int MENU_ITEM_FPS = EDITION_MAX;
-static constexpr int MENU_ITEM_STYLE = EDITION_MAX + 1;
-static constexpr int MENU_ITEM_EXIT = EDITION_MAX + 2;
-static constexpr int MENU_ITEM_COUNT = EDITION_MAX + 3;
+static constexpr int MENU_ITEM_LEVELNAMES = EDITION_MAX + 1;
+static constexpr int MENU_ITEM_STYLE = EDITION_MAX + 2;
+static constexpr int MENU_ITEM_EXIT = EDITION_MAX + 3;
+static constexpr int MENU_ITEM_COUNT = EDITION_MAX + 4;
 
 // Where this XBE lives, most likely first.
 //
@@ -333,6 +366,7 @@ static void relaunchSelf(const LaunchAction action, const int edition) noexcept 
     gLaunchPayload.magic = LAUNCH_MAGIC;
     gLaunchPayload.action = (uint32_t) action;
     gLaunchPayload.overlayMode = gOverlayMode;
+    gLaunchPayload.levelNameMode = gLevelNameMode;
     gLaunchPayload.edition = edition;
 
     for (const char* const pXbePath : kSelfXbePaths) {
@@ -375,7 +409,20 @@ static void exitToDashboard() noexcept {
 static bool readLaunchRequest(LaunchAction& actionOut, int& editionOut) noexcept {
     actionOut = LAUNCH_ACTION_MENU;
     editionOut = -1;
-    gOverlayMode = OVERLAY_OFF;
+
+    // Note: the settings are deliberately NOT defaulted here.
+    //
+    // They were, and it undid the file that had just been read. 'loadSettings' runs immediately before this and puts
+    // what was saved into those globals; resetting them at the top of this threw that away before even looking at
+    // whether there was a payload to replace it with. On a cold boot there is none - the function returns below - and
+    // the settings were back at their defaults having been loaded correctly a moment earlier.
+    //
+    // It hid because the game and the launcher hand these back and forth in the payload: start a game, quit to the
+    // menu, and the value comes back from the payload rather than from the file, so it looks like it stuck. Only
+    // turning the console off showed otherwise. The frame rate setting had the same fault; the menu style did not,
+    // which is why that one survived a power cycle and the other two did not.
+    //
+    // Anything the payload carries is applied further down, which is the only place these should be written.
 
     unsigned long launchDataType = 0;
     const unsigned char* pLaunchData = nullptr;
@@ -397,6 +444,10 @@ static bool readLaunchRequest(LaunchAction& actionOut, int& editionOut) noexcept
 
     if ((payload.overlayMode >= 0) && (payload.overlayMode < OVERLAY_MODE_COUNT)) {
         gOverlayMode = payload.overlayMode;
+    }
+
+    if ((payload.levelNameMode >= 0) && (payload.levelNameMode < LEVELNAMES_MODE_COUNT)) {
+        gLevelNameMode = payload.levelNameMode;
     }
 
     return true;
@@ -729,6 +780,17 @@ static void runBootstrapMenu() {
             }
         }
 
+        if (selected == MENU_ITEM_LEVELNAMES) {
+            if (bLeftPressed || bRightPressed) {
+                const int dir = (bRightPressed) ? 1 : (LEVELNAMES_MODE_COUNT - 1);
+                gLevelNameMode = (gLevelNameMode + dir) % LEVELNAMES_MODE_COUNT;
+                saveSettings();     // Written as it changes, so it survives however the launcher is left
+                markRowChanged(MENU_ITEM_LEVELNAMES);
+                selectSound();
+                appendBootLog("MENU: level names changed");
+            }
+        }
+
         // The style row cycles through Simple and whichever editions are actually here.
         //
         // Skipping the absent ones matters: an edition with no disc has no background and no font, so offering it as a
@@ -853,6 +915,8 @@ static void runBootstrapMenu() {
                 std::snprintf(out, outSize, "%s", g_editions[row].name);
             } else if (row == MENU_ITEM_FPS) {
                 std::snprintf(out, outSize, "FPS %s", kOverlayModeNames[gOverlayMode]);
+            } else if (row == MENU_ITEM_LEVELNAMES) {
+                std::snprintf(out, outSize, "Levels %s", kLevelNameModeNames[gLevelNameMode]);
             } else if (row == MENU_ITEM_STYLE) {
                 std::snprintf(out, outSize, "Style %s", menuStyleName(gMenuStyle));
             } else {
@@ -968,6 +1032,13 @@ static void runBootstrapMenu() {
             (selected == MENU_ITEM_FPS) ? "  (LEFT/RIGHT changes)" : ""
         );
 
+        debugPrint(
+            "[%c] Level Names: %-14s%s\n",
+            (selected == MENU_ITEM_LEVELNAMES) ? '>' : ' ',
+            kLevelNameModeNames[gLevelNameMode],
+            (selected == MENU_ITEM_LEVELNAMES) ? "  (LEFT/RIGHT changes)" : ""
+        );
+
         // The style row, which this list did not show.
         //
         // It was navigable and changeable here but never printed, so on the plain menu the cursor could sit on a row
@@ -1074,6 +1145,7 @@ int main(const int argc, const char* const* const argv) {
             XboxDiag::gShowFullOverlay = (gOverlayMode == OVERLAY_VERBOSE);
             XboxDiag::gShowFpsOverlay = ((gOverlayMode == OVERLAY_FPS) || (gOverlayMode == OVERLAY_FPS_MS));
             XboxDiag::gShowFpsMs = (gOverlayMode == OVERLAY_FPS_MS);
+            Game::gbUseNamedLevels = (gLevelNameMode == LEVELNAMES_NAMED);
 
             appendBootLog("BOOT: restarted to play a game");
 
