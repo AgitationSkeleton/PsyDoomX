@@ -24,9 +24,10 @@ jobs:
       # cached so it only costs the first run after nxdk changes.
       - name: Install the toolchain nxdk needs
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            clang lld llvm bison flex cmake make git ca-certificates
+          # These are what nxdk's own Ubuntu CI installs - 'llvm lld pkgconf' - plus cmake, which this
+          # project needs and theirs does not. 'pkgconf' was the one missing first time round.
+          sudo apt-get -y update
+          sudo apt-get -y install llvm lld pkgconf cmake make git ca-certificates
 
       - name: Check out
         uses: actions/checkout@v4
@@ -55,7 +56,14 @@ jobs:
 
       - name: Build nxdk
         if: steps.nxdk-cache.outputs.cache-hit != 'true'
-        run: make -C nxdk NXDK_ONLY=y -j "$(nproc)"
+        # Built the way nxdk's own CI builds it, in '.ci_build_samples.sh': activate the environment
+        # first, then make from inside the tree. The first attempt did neither - it ran 'make -C nxdk'
+        # from outside with none of that environment set - and the build failed before producing
+        # anything. Worth copying exactly rather than approximating.
+        run: |
+          cd nxdk
+          eval "$(./bin/activate -s)"
+          make NXDK_ONLY=y -j "$(nproc)"
 
       - name: Check nxdk produced its toolchain file
         run: test -f nxdk/share/toolchain-nxdk.cmake
