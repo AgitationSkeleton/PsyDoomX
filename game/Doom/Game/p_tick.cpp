@@ -450,6 +450,19 @@ void P_CheckCheats() noexcept {
                 Controls::setActivePlayer(savedActivePlayer);
                 Splitscreen::pointDrawAt(savedViewPlayer);      // Back to whoever the console draws as normally
 
+                // Throw away anything player two's latches picked up while the menu was open.
+                //
+                // The menu is a blocking loop and the input gather runs inside it, so player two pressing select in
+                // there sets the 'open the options menu' latch again - and nothing consumes it until this function
+                // runs again, which is immediately after the menu closes. So it reopened, they pressed again to get
+                // out, and that queued another one: the menu flickering in and out with player two apparently unable
+                // to leave it, while player one pressing select at the right moment broke the cycle.
+                //
+                // These latches exist to carry a press across frames that are not ticks. Carrying one across the
+                // whole lifetime of a menu is not what they are for.
+                gbXbP2MenuBackLatched = false;
+                gbXbP2PauseLatched = false;
+
                 // Player two's bindings are their own file, so a change made here has to be saved to it
                 if (playerIdx == 1) {
                     Config::gbNeedSave_ControlsP2 = true;
