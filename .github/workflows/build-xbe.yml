@@ -17,6 +17,14 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
+    # Needed to create a release and attach the executable to it.
+    #
+    # The default for the workflow token is read only, so the release step failed with 'Resource not
+    # accessible by integration' - the only step in this workflow that had never run before, since every
+    # earlier run was a branch push rather than a tag. Nothing else here needs more than reading.
+    permissions:
+      contents: write
+
     steps:
       # nxdk is built from source rather than pulled as an image.
       #
