@@ -27,6 +27,7 @@
 #include "PsyDoom/Config/Config.h"
 #include "PsyDoom/DemoPlayer.h"
 #include "PsyDoom/Game.h"
+#include "PsyDoom/Randomizer.h"
 #include "sprinfo.h"
 
 #include <algorithm>
@@ -1325,7 +1326,17 @@ void A_BossDeath(mobj_t& actor) noexcept {
     // Determine which line tag would be triggered based on the active boss specials for the current map, and what died.
     // This tag will be triggered when all enemies of the actor's type die:
     const uint32_t bossSpecialFlags = gMapBossSpecialFlags;
-    const mobjtype_t actorType = actor.type;
+
+    // PsyDoom: what the thing started out as, rather than what it is now.
+    //
+    // The Randomizer can turn the Mancubus a map is waiting on into something else entirely, and the map still has to
+    // open when the last of them dies. Outside the Randomizer this is the same value as 'actor.type', because nothing
+    // else in the game ever changes what a thing is.
+    #if PSYDOOM_MODS
+        const mobjtype_t actorType = Randomizer::originalTypeOf(actor);
+    #else
+        const mobjtype_t actorType = actor.type;
+    #endif
 
     int32_t triggerTag;
 
@@ -1360,7 +1371,14 @@ void A_BossDeath(mobj_t& actor) noexcept {
     // If all map objects of the given actor type are dead then we can trigger the special for the boss death.
     // Otherwise if we find one that is alive, then we can't:
     for (mobj_t* pmobj = gMobjHead.next; pmobj != &gMobjHead; pmobj = pmobj->next) {
-        if ((pmobj != &actor) && (pmobj->type == actorType) && (pmobj->health > 0))
+        // PsyDoom: counted by what each thing started out as, for the same reason as above
+        #if PSYDOOM_MODS
+            const mobjtype_t otherType = Randomizer::originalTypeOf(*pmobj);
+        #else
+            const mobjtype_t otherType = pmobj->type;
+        #endif
+
+        if ((pmobj != &actor) && (otherType == actorType) && (pmobj->health > 0))
             return;
     }
 

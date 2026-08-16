@@ -24,6 +24,7 @@
 #include "p_setup.h"
 #include "p_tick.h"
 #include "PsyDoom/Game.h"
+#include "PsyDoom/Randomizer.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -217,6 +218,10 @@ mobj_t* P_SpawnMobj(const fixed_t x, const fixed_t y, const fixed_t z, const mob
     mobjinfo_t& info = gMobjInfo[type];
     mobj.type = type;
     mobj.info = &info;
+
+    // PsyDoom: what this started out as. Set here rather than left zeroed because zero is a real type - 'MT_PLAYER' -
+    // so an untouched thing would otherwise claim to have once been a player.
+    mobj.randomizerOriginalType = type;
     mobj.x = x;
     mobj.y = y;
     mobj.radius = info.radius;
@@ -360,6 +365,12 @@ void P_SpawnMapThing(const mapthing_t& mapthing) noexcept {
 
     // Remember player starts for single player and co-op games
     if (mapthing.type <= MAXPLAYERS) {
+        // PsyDoom: these never become things at all, so the Randomizer has to be told about them here if they are to
+        // be reported as left alone
+        #if PSYDOOM_MODS
+            Randomizer::noteMapThingSkipped(mapthing.type);
+        #endif
+
         gPlayerStarts[mapthing.type - 1] = mapthing;
 
         // PsyDoom: add this to the list of ALL player starts, including duplicate ones that create 'Voodoo dolls'
@@ -372,6 +383,10 @@ void P_SpawnMapThing(const mapthing_t& mapthing) noexcept {
 
     // Remember deathmatch starts for deathmatch games
     if (mapthing.type == 11) {
+        #if PSYDOOM_MODS
+            Randomizer::noteMapThingSkipped(mapthing.type);
+        #endif
+
         if (gpDeathmatchP < &gDeathmatchStarts[MAX_DEATHMATCH_STARTS]) {
             D_memcpy(gpDeathmatchP, &mapthing, sizeof(mapthing_t));
             gpDeathmatchP++;
@@ -387,7 +402,8 @@ void P_SpawnMapThing(const mapthing_t& mapthing) noexcept {
             const bool bAllowDmThings = (
                 (gNetGame == gt_deathmatch) ||
                 ((gNetGame == gt_single) && Game::gSettings.bSinglePlayerForceSpawnDmThings) ||
-                ((gNetGame == gt_coop) && Game::gSettings.bCoopForceSpawnDeathmatchThings)
+                ((gNetGame == gt_coop) && Game::gSettings.bCoopForceSpawnDeathmatchThings) ||
+                Randomizer::gbEnabled    // Deathmatch only things take part in the Randomizer, wherever they are
             );
         #else
             // Ignore if it's a deathmatch only thing and this is not deathmatch

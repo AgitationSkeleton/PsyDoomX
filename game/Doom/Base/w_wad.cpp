@@ -13,6 +13,7 @@
 #include "PsyDoom/WadList.h"
 
 #if defined(__XBOX__)
+    #include "PsyDoom/MasterMonsters.h"
     #include "PsyDoom/PlayerColour.h"
     #include "PsyDoom/SsgStyle.h"
 #endif
@@ -46,6 +47,7 @@ void W_Init() noexcept {
     #if defined(__XBOX__)
         SsgStyle::addOverrideWads(gMainWadList);
         PlayerColour::addOverrideWad(gMainWadList);
+        MasterMonsters::addOverrideWad(gMainWadList);
     #endif
     const GameConstants& gameConsts = Game::gConstants;
 

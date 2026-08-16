@@ -14,6 +14,7 @@
 #include "PsyDoom/Game.h"
 #include "PsyDoom/Controls.h"
 #include "PsyDoom/Splitscreen.h"
+#include "PsyDoom/Randomizer.h"
 #include "PsyDoom/MapInfo/MapInfo.h"
 #include "PsyDoom/PlayerPrefs.h"
 #include "PsyDoom/PsxPadButtons.h"
@@ -121,6 +122,19 @@ static const menuitem_t gOptMenuItems_Splitscreen[] = {
 };
 #endif
 
+// PsyDoom: the in game layout for the Randomizer, which has no save and load.
+//
+// A run is meant to be played as it was rolled, and a save would in any case come back to a differently randomized
+// level, since the roll happens on load. Written out as its own list rather than filtered from the one above because
+// each row carries its own position: leaving one out of the middle would leave a hole where it was.
+static const menuitem_t gOptMenuItems_Randomizer[] = {
+    { opt_music,            62, 50  },
+    { opt_sound,            62, 90  },
+    { opt_extra_options,    62, 130 },
+    { opt_main_menu,        62, 155 },
+    { opt_restart,          62, 180 },
+};
+
 static const menuitem_t gOptMenuItems_NetGame[] = {
     { opt_music,        62, 70  },
     { opt_sound,        62, 110 },
@@ -196,6 +210,10 @@ void O_Init() noexcept {
         gOptionsMenuSize = C_ARRAY_SIZE(gOptMenuItems_Splitscreen);
     }
 #endif
+    else if (gbGamePaused && Randomizer::gbEnabled) {
+        gpOptionsMenuItems = gOptMenuItems_Randomizer;
+        gOptionsMenuSize = C_ARRAY_SIZE(gOptMenuItems_Randomizer);
+    }
     else if (gbGamePaused) {
         gpOptionsMenuItems = gOptMenuItems_Single;
         gOptionsMenuSize = C_ARRAY_SIZE(gOptMenuItems_Single);

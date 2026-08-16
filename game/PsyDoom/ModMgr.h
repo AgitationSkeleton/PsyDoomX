@@ -14,6 +14,15 @@ void addUserWads(WadList& wadList) noexcept;
 
 // File overrides mechanism
 bool areOverridesAvailableForFile(const CdFileId discFile) noexcept;
+
+// Register one file as overridden, by name, without searching a directory for it.
+//
+// Needed because this port cannot do the searching: nxdk's libc++ has neither '<filesystem>' nor a dirent shim, so
+// 'determineFileOverridesInUserDataDir' returns immediately and the override set stays empty. Anything relying on
+// auto-discovery is therefore inert here - it does not fail loudly, it just never overrides anything.
+//
+// Call after 'init', which clears the set.
+void addFileOverride(const CdFileId discFile) noexcept;
 bool isFileOverriden(const PsxCd_File& file) noexcept;
 bool openOverridenFile(const CdFileId discFile, PsxCd_File& fileOut) noexcept;
 void closeOverridenFile(PsxCd_File& file) noexcept;

@@ -177,7 +177,15 @@ static std::string getOverridenFilePath(const CdFileId discFile) noexcept {
     std::string filePath;
     filePath.reserve(255);
     filePath = ProgArgs::gDataDirPath;
-    filePath.push_back('/');
+
+    // This console's paths are drive-letter and backslash ('E:\Apps\...'), and mixing separators is not something
+    // nxdk's file layer can be relied on to sort out the way a full Win32 would.
+    #if defined(__XBOX__)
+        filePath.push_back('\\');
+    #else
+        filePath.push_back('/');
+    #endif
+
     filePath += discFile.c_str().data();
 
     return filePath;
@@ -233,6 +241,12 @@ bool areOverridesAvailableForFile(const CdFileId discFile) noexcept {
     CdFileId ucaseDiscFile = discFile;
     makeUppercase(ucaseDiscFile.chars, CdFileId::MAX_LEN);
     return (gOverridenFileNames.count(ucaseDiscFile) > 0);
+}
+
+void addFileOverride(const CdFileId discFile) noexcept {
+    CdFileId ucaseDiscFile = discFile;
+    makeUppercase(ucaseDiscFile.chars, CdFileId::MAX_LEN);
+    gOverridenFileNames.insert(ucaseDiscFile);
 }
 
 bool isFileOverriden(const PsxCd_File& file) noexcept {

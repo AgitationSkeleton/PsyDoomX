@@ -37,6 +37,7 @@
     #include "PsyDoom/XboxLog.h"
 #endif
 #include "PsyDoom/MapHash.h"
+#include "PsyDoom/Randomizer.h"
 #include "PsyDoom/MapInfo/GecMapInfo.h"
 #include "PsyDoom/MapInfo/MapInfo.h"
 #include "PsyDoom/MapPatcher/MapPatcher.h"
@@ -585,6 +586,12 @@ static void P_LoadSectors(const int32_t lumpNum) noexcept {
     } else {
         gpSkyTexture = nullptr;
     }
+
+    // PsyDoom: the Randomizer picks a different one. Here rather than later because the fire sky setup decides what it
+    // is looking at from the name of the texture it finds, so all that has to happen is that it finds another.
+    #if PSYDOOM_MODS
+        Randomizer::randomizeSky();
+    #endif
 }
 
 //------------------------------------------------------------------------------------------------------------------------------------------
@@ -1797,6 +1804,14 @@ void P_SetupLevel(const int32_t mapNum, [[maybe_unused]] const skill_t skill) no
         #endif
     }
 
+    // PsyDoom: roll the level, if this is a Randomizer game.
+    //
+    // Before precaching rather than after, because what gets precached has to be what the level ended up containing
+    // rather than what it was authored with.
+    #if PSYDOOM_MODS
+        Randomizer::randomizeLevel();
+    #endif
+
     // PsyDoom: precache all sprites needed for the level
     #if PSYDOOM_MODS
         MobjSpritePrecacher::doPrecaching();
@@ -1919,6 +1934,14 @@ void P_SetupLevel(const int32_t mapNum, [[maybe_unused]] const skill_t skill) no
             }
         #endif
     }
+
+    // PsyDoom: something to face a rolled level with.
+    //
+    // Right at the end because the players are only spawned just above this, and there is no one to give a weapon to
+    // before that.
+    #if PSYDOOM_MODS
+        Randomizer::grantStartingWeapon();
+    #endif
 
     // PsyDoom: monitor the current map file for changes if appropriate
     #if PSYDOOM_MODS

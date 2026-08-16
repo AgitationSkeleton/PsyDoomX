@@ -293,6 +293,8 @@ set(SOURCE_FILES
     "PsyDoom/PlayerPrefs.h"
     "PsyDoom/Splitscreen.cpp"
     "PsyDoom/Splitscreen.h"
+    "PsyDoom/Randomizer.cpp"
+    "PsyDoom/Randomizer.h"
     "PsyDoom/ProgArgs.cpp"
     "PsyDoom/ProgArgs.h"
     "PsyDoom/PsxPadButtons.h"
@@ -533,12 +535,12 @@ elseif (PLATFORM_XBOX)
         "PsyDoom/LauncherAssets.h"
         "PsyDoom/LauncherAudio.cpp"
         "PsyDoom/LauncherAudio.h"
+        "PsyDoom/MasterMonsters.cpp"
+        "PsyDoom/MasterMonsters.h"
         "PsyDoom/PlayerColour.cpp"
         "PsyDoom/PlayerColour.h"
         "PsyDoom/SsgStyle.cpp"
         "PsyDoom/SsgStyle.h"
-        "PsyDoom/XboxNv2aPresent.cpp"
-        "PsyDoom/XboxNv2aPresent.h"
     )
 else()
     # Linux or other platforms
@@ -610,11 +612,6 @@ if (PLATFORM_XBOX)
 
     target_link_libraries(${GAME_TGT_NAME} "$ENV{NXDK_DIR}/lib/libSDL2.lib")
 
-    # pbkit, for presenting through the GPU rather than writing the framebuffer with the CPU.
-    #
-    # See 'PsyDoom/XboxNv2aPresent.cpp'. Linked whether or not the GPU present is switched on, so that the path stays
-    # compiled and cannot rot while it is off.
-    target_link_libraries(${GAME_TGT_NAME} "$ENV{NXDK_DIR}/lib/libpbkit.lib")
     target_include_directories(${GAME_TGT_NAME} PRIVATE "$ENV{NXDK_DIR}/lib")
 
     # Networking, for the diagnostic relay in 'PsyDoom/XboxLog.cpp'.

@@ -271,8 +271,23 @@ bool init(const char* const doomCdCuePath) noexcept {
     constexpr uint32_t PSX_SPU_RAM_SIZE = 512 * 1024;
 
     #if defined(__XBOX__)
+        // Original voice count, but more than the original RAM.
+        //
+        // 24 voices because that is a rendering cost and this console has none to spare. The RAM is a different matter:
+        // it is one flat allocation in main memory and costs nothing to run, and 512 KiB is not enough for the
+        // Randomizer. That mode makes every monster in the game audible by loading the union of every map's sounds,
+        // which the engine's own comment in 's_sound.cpp' says is only reasonable "because of PsyDoom's greatly
+        // expanded sound RAM" - so keeping the original size here was quietly ruling the feature out.
+        //
+        // Measured off the discs, the union comes to 429.7 KiB for Doom and Final Doom and 512.9 KiB for the Master
+        // Edition, against 508 KiB usable once the capture buffers are taken off. Doom and Final Doom then add about
+        // 164 KiB of borrowed Master Edition monster samples on top. So the worst case is a little under 700 KiB
+        // before the general sounds and the map's music, neither of which is counted above.
+        //
+        // 2 MiB leaves better than twice that headroom for 1.5 MiB of main memory, which is affordable here in a way
+        // the 16 MiB limit-removing default is not.
         constexpr uint32_t SPU_VOICE_COUNT = 24;
-        constexpr uint32_t spuRamSize = PSX_SPU_RAM_SIZE;
+        constexpr uint32_t spuRamSize = 2 * 1024 * 1024;
     #elif PSYDOOM_LIMIT_REMOVING
         constexpr uint32_t DEFAULT_SPU_RAM_SIZE = 16 * 1024 * 1024;
         constexpr uint32_t SPU_VOICE_COUNT = 64;

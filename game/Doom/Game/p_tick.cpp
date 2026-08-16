@@ -34,6 +34,7 @@
 #include "PsyDoom/Game.h"
 #include "Doom/Base/i_misc.h"
 #include "PsyDoom/Splitscreen.h"
+#include "PsyDoom/Randomizer.h"
 #include "PsyDoom/SsgStyle.h"
 
 #if defined(__XBOX__)
@@ -1304,7 +1305,13 @@ void P_Start() noexcept {
 
         if (gbAutoSaveOnLevelStart) {
             gbAutoSaveOnLevelStart = false;
-            SaveGameForSlot(SaveFileSlot::AUTOSAVE, SaveGameContext::Autosave);
+            // PsyDoom: the Randomizer does not save at all - see 'Randomizer.h'
+            if (Randomizer::allowSaveAndLoad()) {
+                // PsyDoom: the Randomizer does not save at all - see 'Randomizer.h'
+            if (Randomizer::allowSaveAndLoad()) {
+                SaveGameForSlot(SaveFileSlot::AUTOSAVE, SaveGameContext::Autosave);
+            }
+            }
         }
     #endif
 }

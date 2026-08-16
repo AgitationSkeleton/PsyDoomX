@@ -12,6 +12,7 @@
 #include "Doom/Renderer/r_data.h"
 #include "o_main.h"
 #include "PsyDoom/Game.h"
+#include "PsyDoom/Randomizer.h"
 #include "PsyDoom/Splitscreen.h"
 #include "PsyDoom/Input.h"
 #include "PsyDoom/MapInfo/GecMapInfo.h"
@@ -109,6 +110,32 @@ static const char gGameTypeNames[NUMGAMETYPES][16] = {
     "Cooperative",
     "Deathmatch"
 };
+
+// PsyDoom: the Randomizer sits one past the game types on the selector.
+//
+// It is not a game type of its own - see 'Randomizer.h' for why - so the selector counts one further than there are
+// game types and that last position means single player with the Randomizer on. Keeping it out of 'gametype_t' keeps
+// it out of everything that switches on a game type: the netcode, the save format and the status bar all carry on
+// seeing a single player game, which is what it is.
+static constexpr int32_t MENU_MODE_RANDOMIZER = NUMGAMETYPES;
+static const char gRandomizerModeName[] = "Randomizer";
+
+// Where the selector is, rather than what the game type is: the two differ only at the last position
+static int32_t gMenuGameMode = 0;
+
+static void ApplyMenuGameMode() noexcept {
+    if (gMenuGameMode == MENU_MODE_RANDOMIZER) {
+        gStartGameType = gt_single;
+        Randomizer::setEnabled(true);
+    } else {
+        gStartGameType = (gametype_t) gMenuGameMode;
+        Randomizer::setEnabled(false);
+    }
+}
+
+static const char* MenuGameModeName() noexcept {
+    return (gMenuGameMode == MENU_MODE_RANDOMIZER) ? gRandomizerModeName : gGameTypeNames[gStartGameType];
+}
 
 static const char gSkillNames[NUMSKILLS][16] = {
     "I am a Wimp",
@@ -780,10 +807,12 @@ gameaction_t M_Ticker() noexcept {
 
         if (bAllowMultiplayer) {
             if (bMenuRight) {
-                if (gStartGameType < gt_deathmatch) {
-                    gStartGameType = (gametype_t)((uint32_t) gStartGameType + 1);
+                if (gMenuGameMode < MENU_MODE_RANDOMIZER) {
+                    gMenuGameMode++;
+                    ApplyMenuGameMode();
 
-                    if (gStartGameType == gt_coop) {
+                    // Both co-op and the Randomizer start from the first map rather than wherever the previous mode was
+                    if ((gStartGameType == gt_coop) || Randomizer::gbEnabled) {
                         gStartMapOrEpisode = 1;
                     }
 
@@ -791,8 +820,9 @@ gameaction_t M_Ticker() noexcept {
                 }
             }
             else if (bMenuLeft) {
-                if (gStartGameType != gt_single) {
-                    gStartGameType = (gametype_t)((uint32_t) gStartGameType -1);
+                if (gMenuGameMode > 0) {
+                    gMenuGameMode--;
+                    ApplyMenuGameMode();
 
                     if (gStartGameType == gt_single) {
                         gStartMapOrEpisode = 1;
@@ -984,7 +1014,7 @@ void M_Drawer() noexcept {
 
     // Draw the text for the various menu entries
     I_DrawString(74, gameModeLine1Y, "Game Mode");
-    I_DrawString(90, gameModeLine2Y, gGameTypeNames[gStartGameType]);
+    I_DrawString(90, gameModeLine2Y, MenuGameModeName());
 
     if (gStartGameType == gt_single) {
         I_DrawString(74, levelY, Game::getEpisodeName(gStartMapOrEpisode).c_str().data());

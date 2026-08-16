@@ -13,7 +13,6 @@
 
 #if defined(__XBOX__)
 #include "Splitscreen.h"
-#include "XboxNv2aPresent.h"
 #include "XboxDiag.h"
 #include "XboxLog.h"
 #include "Doom/Base/i_texcache.h"
@@ -549,64 +548,6 @@ void VideoBackend_SDL::presentSdlFramebufferTexture() noexcept {
     // multiple of 256 and stretching to fill would distort the picture as well as costing more.
     //--------------------------------------------------------------------------------------------------------------
     const uint64_t xbDirectStart = XboxLog::nowMicros();
-
-    // The GPU present, when it is switched on.
-    //
-    // Same layout decisions as the CPU path below, expressed as quads instead of loops - which is the point: the pixels
-    // are the ones the rasteriser produced, sampled nearest and scaled by hardware that does it for nothing.
-    if (XboxNv2aPresent::init()) {
-        const VIDEO_MODE gpuMode = XVideoGetMode();
-        const Gpu::Core& gpu = PsxVm::gGpu;
-        const int32_t screenW = gpuMode.width;
-        const int32_t screenH = gpuMode.height;
-
-        XboxNv2aPresent::beginFrame();
-
-        const bool bTwoViewports = (Splitscreen::isActive() && (!Splitscreen::isFullScreenSequence()));
-
-        if (!bTwoViewports) {
-            const int32_t viewW = (int32_t)(ORIG_DRAW_RES_X * 2);
-            const int32_t viewH = (int32_t)(ORIG_DRAW_RES_Y * 2);
-            const bool bFullScreenSeq = Splitscreen::isFullScreenSequence();
-            const uint32_t srcX = (bFullScreenSeq) ? Splitscreen::VIEW_VRAM_X[0] : (uint32_t) gpu.displayAreaX;
-            const uint32_t srcY = (bFullScreenSeq) ? Splitscreen::VIEW_VRAM_Y[0] : (uint32_t) gpu.displayAreaY;
-
-            XboxNv2aPresent::drawVramRect(
-                srcX, srcY, ORIG_DRAW_RES_X, ORIG_DRAW_RES_Y,
-                (screenW - viewW) / 2, (screenH - viewH) / 2, viewW, viewH
-            );
-        }
-        else if (Splitscreen::getLayout() == Splitscreen::Layout::SideBySide) {
-            const int32_t viewW = screenW / 2;
-            const int32_t viewH = (viewW * 3) / 4;
-            const int32_t viewY = (screenH - viewH) / 2;
-
-            for (int32_t player = 0; player < 2; ++player) {
-                XboxNv2aPresent::drawVramRect(
-                    Splitscreen::VIEW_VRAM_X[player], Splitscreen::VIEW_VRAM_Y[player],
-                    ORIG_DRAW_RES_X, ORIG_DRAW_RES_Y,
-                    viewW * player, viewY, viewW, viewH
-                );
-            }
-        }
-        else {
-            const int32_t viewW = screenW;
-            const int32_t viewH = screenH / 2;
-
-            for (int32_t player = 0; player < 2; ++player) {
-                XboxNv2aPresent::drawVramRect(
-                    Splitscreen::VIEW_VRAM_X[player], Splitscreen::VIEW_VRAM_Y[player],
-                    ORIG_DRAW_RES_X, ORIG_DRAW_RES_Y,
-                    0, viewH * player, viewW, viewH
-                );
-            }
-        }
-
-        XboxNv2aPresent::endFrame();
-
-        gXbFbWriteMicros = 0;   // Nothing of the CPU present's accounting applies to this path
-        return;
-    }
 
     const VIDEO_MODE videoMode = XVideoGetMode();
     uint8_t* const pFrameBuffer = XVideoGetFB();

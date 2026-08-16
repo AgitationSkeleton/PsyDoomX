@@ -234,6 +234,12 @@ struct mobj_t {
     mobj_t*         snext;              // Intrusive fields for the linked list of things in the current sector
     mobj_t*         sprev;
     angle_t         angle;              // Direction the thing is facing in
+    // PsyDoom: what this thing was before the Randomizer changed it, or 'MT_NOTHING' if it was never changed.
+    //
+    // The boss death specials are keyed on what died, so a map waiting for the last Mancubus has to keep waiting for
+    // whatever that Mancubus became. Not part of a save: 'SavedMobjT' has its own fields and serializes explicitly.
+    mobjtype_t      randomizerOriginalType;
+
     uint32_t        sprite;             // Current sprite displayed
     uint32_t        frame;              // Current sprite frame displayed. Must use 'FF_FRAMEMASK' to get the actual frame number.
     mobj_t*         bnext;              // Linked list of things in this blockmap block

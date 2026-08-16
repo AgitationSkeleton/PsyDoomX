@@ -22,3 +22,6 @@ relay_build.log
 # Development leftovers that must not reach a public repo
 logs/
 *.log
+
+# Windows folder metadata
+desktop.ini

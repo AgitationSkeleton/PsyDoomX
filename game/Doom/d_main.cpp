@@ -30,6 +30,7 @@
 #include "PsyDoom/DemoRecorder.h"
 #include "PsyDoom/Game.h"
 #include "PsyDoom/PlayerColour.h"
+#include "PsyDoom/Randomizer.h"
 #include "PsyDoom/Splitscreen.h"
 #include "PsyDoom/SsgStyle.h"
 #include "PsyDoom/XboxLog.h"
@@ -463,6 +464,11 @@ gameaction_t RunTitle() noexcept {
 // Load and run the specified (built-in) demo file
 //------------------------------------------------------------------------------------------------------------------------------------------
 gameaction_t RunDemo(const CdFileId file) noexcept {
+    // PsyDoom: a demo is a recording of an ordinary game and has to play back exactly, so the Randomizer is
+    // off for it whatever the menu was last set to. Without this a demo started after a Randomizer run would be
+    // randomized underneath the recorded inputs and desync immediately.
+    Randomizer::setEnabled(false);
+
     // PsyDoom: ensure this required graphic is loaded before starting the demo.
     // Also skip running the demo if the file does not exist.
     #if PSYDOOM_MODS

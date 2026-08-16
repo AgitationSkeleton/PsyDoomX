@@ -5,6 +5,7 @@
 #include "DiscInfo.h"
 #include "DiscReader.h"
 #include "IsoFileSys.h"
+#include "MasterMonsters.h"
 #include "PlayerColour.h"
 #include "SsgStyle.h"
 #include "WadUtils.h"
@@ -250,6 +251,107 @@ struct LumpName8 {
     char chars[8];
 };
 
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Write a WAD of sprite lumps copied straight off a disc, keeping their names and their packing.
+//
+// Used for the Master Edition's extra monsters, which are wanted exactly as they are. The super shotgun's writer cannot
+// serve here because that one renames what it copies and expects a fixed ten frames; this takes as many as it is given.
+//
+// The two sizes are the same trap as everywhere else: a directory entry records what a lump unpacks to, while the bytes
+// it occupies are the distance to the next entry. The directory carries the first across and the copying uses the
+// second, and the closing marker sits at the end of the data so the last lump can be measured the same way.
+//------------------------------------------------------------------------------------------------------------------------------------------
+static bool writeCopiedSpriteWad(
+    DiscReader& discReader,
+    const uint32_t wadStartLba,
+    const char* const outPath,
+    const std::vector<LumpName8>& lumpNames,
+    const std::vector<int32_t>& lumpOffsets,
+    const std::vector<int32_t>& lumpUnpackedSizes,
+    const std::vector<int32_t>& lumpRawSizes,
+    const std::vector<bool>& bLumpCompressed
+) noexcept {
+    struct OutLump {
+        int32_t offset;
+        int32_t size;
+        char    name[8];
+    };
+
+    static constexpr int32_t HEADER_SIZE = 12;
+
+    const int32_t numLumps = (int32_t) lumpOffsets.size();
+
+    if (numLumps <= 0)
+        return false;
+
+    std::vector<OutLump> dir;
+    std::vector<std::byte> body;
+
+    {
+        OutLump& startMarker = dir.emplace_back();
+        std::memcpy(startMarker.name, "S_START", 7);
+        startMarker.offset = HEADER_SIZE;
+    }
+
+    for (int32_t i = 0; i < numLumps; ++i) {
+        if ((lumpRawSizes[i] <= 0) || (lumpRawSizes[i] > 512 * 1024))
+            return false;
+
+        if (!discReader.trackSeekAbs(((int32_t) wadStartLba * 2048) + lumpOffsets[i]))
+            return false;
+
+        std::vector<std::byte> data((size_t) lumpRawSizes[i]);
+
+        if (!discReader.read(data.data(), lumpRawSizes[i]))
+            return false;
+
+        OutLump& out = dir.emplace_back();
+        out.offset = HEADER_SIZE + (int32_t) body.size();
+        out.size = lumpUnpackedSizes[i];
+        std::memcpy(out.name, lumpNames[(size_t) i].chars, 8);
+
+        // The name was stripped of its compression flag when collected; the data still needs it
+        if (bLumpCompressed[i]) {
+            out.name[0] = (char)(out.name[0] | 0x80);
+        }
+
+        body.insert(body.end(), data.begin(), data.end());
+    }
+
+    const int32_t dirOffset = HEADER_SIZE + (int32_t) body.size();
+
+    {
+        OutLump& endMarker = dir.emplace_back();
+        std::memcpy(endMarker.name, "S_END", 5);
+        endMarker.offset = dirOffset;
+    }
+
+    std::vector<std::byte> file;
+    file.reserve((size_t) dirOffset + dir.size() * sizeof(OutLump));
+
+    {
+        char header[HEADER_SIZE];
+        std::memcpy(header, "IWAD", 4);
+        const int32_t lumpCount = (int32_t) dir.size();
+        std::memcpy(header + 4, &lumpCount, sizeof(lumpCount));
+        std::memcpy(header + 8, &dirOffset, sizeof(dirOffset));
+        file.insert(file.end(), (const std::byte*) header, (const std::byte*) header + HEADER_SIZE);
+    }
+
+    file.insert(file.end(), body.begin(), body.end());
+    file.insert(file.end(), (const std::byte*) dir.data(), (const std::byte*) (dir.data() + dir.size()));
+
+    const char* const pLastSlash = std::strrchr(outPath, '\\');
+
+    if (!pLastSlash)
+        return false;
+
+    char dirPath[260] = {};
+    std::memcpy(dirPath, outPath, (size_t)(pLastSlash - outPath));
+
+    return writeCache(dirPath, pLastSlash + 1, file.data(), (int32_t) file.size());
+}
+
 static bool writePlayerColourWad(
     DiscReader& discReader,
     const uint32_t wadStartLba,
@@ -367,6 +469,297 @@ static bool writePlayerColourWad(
     std::memcpy(dirPath, outPath, (size_t)(pLastSlash - outPath));
 
     return writeCache(dirPath, pLastSlash + 1, file.data(), (int32_t) file.size());
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// The sound side of borrowing the Master Edition's monsters.
+//
+// Sprites let the Arch-Vile, the Wolfenstein SS and Commander Keen be drawn; these let them be heard. Two things have
+// to be cached for that: the Master Edition's own sound module, which is what knows the sequences the three use, and
+// their samples, which no other disc carries.
+//
+// Done here for the same reason everything else cross-edition is done here - the launcher is the only thing that sees
+// all three discs. A game only ever sees the one it was started with.
+//------------------------------------------------------------------------------------------------------------------------------------------
+
+// Where the samples live on the Master Edition disc, and which of them each file holds
+static const char* const SOUND_SRC_LCDS[] = {
+    "PSXDOOM/ABIN/CAST.LCD",            // 144 to 149
+    "PSXDOOM/SNDMAPS5/MAP81.LCD",       // 150
+    "PSXDOOM/SNDMAPS6/MAP102.LCD",      // 151, 152
+    "PSXDOOM/SNDMAPS6/MAP103.LCD",      // 153, 154
+    "PSXDOOM/SNDMAPS2/MAP25.LCD",       // 155 to 159
+};
+
+static constexpr const char* WMD_PATH_ON_DISC   = "PSXDOOM/MUSIC/DOOMSND.WMD";
+static constexpr int32_t FIRST_BORROWED_SAMPLE  = 144;
+static constexpr int32_t LAST_BORROWED_SAMPLE   = 159;
+static constexpr int32_t NUM_BORROWED_SAMPLES   = LAST_BORROWED_SAMPLE - FIRST_BORROWED_SAMPLE + 1;
+static constexpr int32_t LCD_SECTOR_SIZE        = 2048;
+
+// Read a whole file off the disc by its path in the file system
+static bool readDiscFile(
+    DiscReader& discReader,
+    const IsoFileSys& fileSys,
+    const char* const path,
+    std::vector<std::byte>& out
+) noexcept {
+    const IsoFileSysEntry* const pEntry = fileSys.getEntry(path);
+
+    if (!pEntry)
+        return false;
+
+    if (!discReader.trackSeekAbs((int32_t) pEntry->startLba * 2048))
+        return false;
+
+    out.resize((size_t) pEntry->size);
+    return discReader.read(out.data(), (int32_t) pEntry->size);
+}
+
+// How big each sample in the module is, which is what says where one ends and the next begins inside an LCD.
+//
+// Walks the module the way 'wess_load_module' does: the header, then each patch group's header followed by its
+// patches, patch voices, patch samples, drum patches and extra data - each present only if its load flag is set.
+static bool readPatchSampleSizes(const std::vector<std::byte>& wmd, std::vector<uint32_t>& sizesOut) noexcept {
+    if (wmd.size() < 16)
+        return false;
+
+    uint32_t moduleId = 0;
+    std::memcpy(&moduleId, wmd.data(), sizeof(moduleId));
+
+    if (std::memcmp(&moduleId, "SPSX", 4) != 0)
+        return false;
+
+    uint8_t numPatchGroups = 0;
+    std::memcpy(&numPatchGroups, wmd.data() + 10, sizeof(numPatchGroups));
+
+    size_t offset = 16;
+
+    for (int32_t groupIdx = 0; groupIdx < (int32_t) numPatchGroups; ++groupIdx) {
+        if (offset + 28 > wmd.size())
+            return false;
+
+        uint32_t loadFlags = 0;
+        uint16_t numPatches = 0, patchSize = 0, numVoices = 0, voiceSize = 0;
+        uint16_t numSamples = 0, sampleSize = 0, numDrums = 0, drumSize = 0;
+        uint32_t extraSize = 0;
+
+        std::memcpy(&loadFlags,  wmd.data() + offset + 0,  sizeof(loadFlags));
+        std::memcpy(&numPatches, wmd.data() + offset + 8,  sizeof(numPatches));
+        std::memcpy(&patchSize,  wmd.data() + offset + 10, sizeof(patchSize));
+        std::memcpy(&numVoices,  wmd.data() + offset + 12, sizeof(numVoices));
+        std::memcpy(&voiceSize,  wmd.data() + offset + 14, sizeof(voiceSize));
+        std::memcpy(&numSamples, wmd.data() + offset + 16, sizeof(numSamples));
+        std::memcpy(&sampleSize, wmd.data() + offset + 18, sizeof(sampleSize));
+        std::memcpy(&numDrums,   wmd.data() + offset + 20, sizeof(numDrums));
+        std::memcpy(&drumSize,   wmd.data() + offset + 22, sizeof(drumSize));
+        std::memcpy(&extraSize,  wmd.data() + offset + 24, sizeof(extraSize));
+
+        offset += 28;
+
+        if (loadFlags & 0x01) { offset += (size_t) numPatches * patchSize; }
+        if (loadFlags & 0x02) { offset += (size_t) numVoices * voiceSize; }
+
+        if (loadFlags & 0x04) {
+            if ((sampleSize != 12) || (offset + (size_t) numSamples * 12 > wmd.size()))
+                return false;
+
+            // A 'patch_sample' is an unused offset, then the size, then where it currently sits in SPU RAM
+            sizesOut.resize((size_t) numSamples);
+
+            for (int32_t i = 0; i < (int32_t) numSamples; ++i) {
+                std::memcpy(&sizesOut[(size_t) i], wmd.data() + offset + (size_t) i * 12 + 4, sizeof(uint32_t));
+            }
+
+            return true;
+        }
+
+        if (loadFlags & 0x08) { offset += (size_t) numDrums * drumSize; }
+        if (loadFlags & 0x10) { offset += extraSize; }
+    }
+
+    return false;
+}
+
+// Take the wanted samples out of one of the Master Edition's LCD files.
+//
+// An LCD opens with a 2048 byte header sector: how many samples it holds, then which module sample each one is. The
+// data follows straight after, in that same order and with no padding, so the only way to find a given sample is to
+// walk from the start adding up sizes - which is why the module has to be read first.
+static void collectSamplesFromLcd(
+    const std::vector<std::byte>& lcd,
+    const std::vector<uint32_t>& sampleSizes,
+    std::vector<std::vector<std::byte>>& sampleDataInOut
+) noexcept {
+    if (lcd.size() < (size_t) LCD_SECTOR_SIZE)
+        return;
+
+    uint16_t numSamples = 0;
+    std::memcpy(&numSamples, lcd.data(), sizeof(numSamples));
+
+    if ((numSamples <= 0) || ((size_t) 2 + (size_t) numSamples * 2 > (size_t) LCD_SECTOR_SIZE))
+        return;
+
+    size_t dataOffset = (size_t) LCD_SECTOR_SIZE;
+
+    for (int32_t i = 0; i < (int32_t) numSamples; ++i) {
+        uint16_t sampleIdx = 0;
+        std::memcpy(&sampleIdx, lcd.data() + 2 + (size_t) i * 2, sizeof(sampleIdx));
+
+        if (sampleIdx >= sampleSizes.size())
+            return;
+
+        const uint32_t size = sampleSizes[sampleIdx];
+
+        if (dataOffset + size > lcd.size())
+            return;
+
+        if ((sampleIdx >= FIRST_BORROWED_SAMPLE) && (sampleIdx <= LAST_BORROWED_SAMPLE)) {
+            std::vector<std::byte>& dest = sampleDataInOut[(size_t)(sampleIdx - FIRST_BORROWED_SAMPLE)];
+
+            if (dest.empty()) {
+                dest.assign(lcd.data() + dataOffset, lcd.data() + dataOffset + size);
+            }
+        }
+
+        dataOffset += size;
+    }
+}
+
+// Write the borrowed samples out as an LCD of their own, in the same format the ones they came from use
+static bool writeMonsterLcd(const std::vector<std::vector<std::byte>>& sampleData) noexcept {
+    std::vector<uint16_t> indices;
+
+    for (int32_t i = 0; i < (int32_t) sampleData.size(); ++i) {
+        if (!sampleData[(size_t) i].empty()) {
+            indices.push_back((uint16_t)(FIRST_BORROWED_SAMPLE + i));
+        }
+    }
+
+    if (indices.empty())
+        return false;
+
+    std::vector<std::byte> file((size_t) LCD_SECTOR_SIZE, std::byte(0));
+    const uint16_t numSamples = (uint16_t) indices.size();
+    std::memcpy(file.data(), &numSamples, sizeof(numSamples));
+    std::memcpy(file.data() + 2, indices.data(), indices.size() * sizeof(uint16_t));
+
+    for (const std::vector<std::byte>& sample : sampleData) {
+        if (!sample.empty()) {
+            file.insert(file.end(), sample.begin(), sample.end());
+        }
+    }
+
+    return writeCache(
+        MasterMonsters::soundDirPath(), MasterMonsters::monsterSoundLcdName(),
+        file.data(), (int32_t) file.size()
+    );
+}
+
+// Cache the substitute sound module and the borrowed samples. Master Edition disc only - it is the only one that has
+// either. See 'MasterMonsters.h' for why standing its module in for the running game's is safe.
+static void buildMasterSoundCache(DiscReader& discReader, const IsoFileSys& fileSys) noexcept {
+    std::vector<std::byte> wmd;
+
+    if (!readDiscFile(discReader, fileSys, WMD_PATH_ON_DISC, wmd)) {
+        assetLog("launcher assets:   no sound module on the Master Edition disc - the extra monsters will be silent");
+        return;
+    }
+
+    std::vector<uint32_t> sampleSizes;
+
+    if (!readPatchSampleSizes(wmd, sampleSizes)) {
+        assetLog("launcher assets:   could not make sense of the Master Edition sound module");
+        return;
+    }
+
+    assetLog(
+        "launcher assets:   sound module read, %d bytes, %d patch samples described",
+        (int) wmd.size(), (int) sampleSizes.size()
+    );
+
+    // A module that does not describe the samples being borrowed cannot say where they sit inside an LCD, so nothing
+    // below would find them. Said plainly rather than left to look like the files were missing.
+    if ((int32_t) sampleSizes.size() <= LAST_BORROWED_SAMPLE) {
+        assetLog(
+            "launcher assets:   module only describes %d samples but %d are needed - is this really a Master Edition disc?",
+            (int) sampleSizes.size(), (int) (LAST_BORROWED_SAMPLE + 1)
+        );
+        return;
+    }
+
+    // The samples, gathered out of the handful of files that hold them.
+    //
+    // Reported per file: if one of the five is missing or has moved between revisions of the disc, that shows up here
+    // as a named file yielding nothing, rather than as a sample count that is quietly short at the end.
+    std::vector<std::vector<std::byte>> sampleData((size_t) NUM_BORROWED_SAMPLES);
+
+    for (const char* const srcPath : SOUND_SRC_LCDS) {
+        std::vector<std::byte> lcd;
+
+        if (!readDiscFile(discReader, fileSys, srcPath, lcd)) {
+            assetLog("launcher assets:     %s - NOT FOUND on this disc", srcPath);
+            continue;
+        }
+
+        int32_t before = 0;
+
+        for (const std::vector<std::byte>& sample : sampleData) {
+            if (!sample.empty()) { before++; }
+        }
+
+        collectSamplesFromLcd(lcd, sampleSizes, sampleData);
+
+        int32_t after = 0;
+
+        for (const std::vector<std::byte>& sample : sampleData) {
+            if (!sample.empty()) { after++; }
+        }
+
+        assetLog(
+            "launcher assets:     %s - %d bytes, yielded %d sample(s)",
+            srcPath, (int) lcd.size(), (int) (after - before)
+        );
+    }
+
+    int32_t numFound = 0;
+    int32_t totalBytes = 0;
+
+    for (const std::vector<std::byte>& sample : sampleData) {
+        if (!sample.empty()) {
+            numFound++;
+            totalBytes += (int32_t) sample.size();
+        }
+    }
+
+    // Which ones did not turn up, by module index. A gap here is what a monster that can be seen but not heard looks
+    // like from this end, and the index says which sound rather than merely how many.
+    if (numFound < NUM_BORROWED_SAMPLES) {
+        char missing[128] = {};
+        int32_t used = 0;
+
+        for (int32_t i = 0; i < NUM_BORROWED_SAMPLES; ++i) {
+            if (sampleData[(size_t) i].empty() && (used < (int32_t) sizeof(missing) - 8)) {
+                used += std::snprintf(missing + used, sizeof(missing) - (size_t) used, "%d ", (int)(FIRST_BORROWED_SAMPLE + i));
+            }
+        }
+
+        assetLog("launcher assets:   missing sample indices: %s", missing);
+    }
+
+    // The samples first: the module is what 'initSounds' takes as the signal that both halves are there, so writing it
+    // last means a run interrupted midway leaves the game going without rather than pointing at samples that are absent.
+    const bool bWroteLcd = writeMonsterLcd(sampleData);
+
+    const bool bWroteWmd = bWroteLcd && writeCache(
+        MasterMonsters::soundDirPath(), "DOOMSND.WMD", wmd.data(), (int32_t) wmd.size()
+    );
+
+    assetLog(
+        "launcher assets:   %d of %d monster samples (%d KiB), module %d KiB, written=%s",
+        (int) numFound, (int) NUM_BORROWED_SAMPLES, (int) (totalBytes / 1024),
+        (int) (wmd.size() / 1024), (bWroteLcd && bWroteWmd) ? "yes" : "NO"
+    );
 }
 
 bool probeDisc(const char* const cuePath, const MenuArt& menuArt, const int32_t ssgStyle) noexcept {
@@ -505,6 +898,15 @@ bool probeDisc(const char* const cuePath, const MenuArt& menuArt, const int32_t 
 
         // The marine's own frames, for telling players apart by colour. Same two-sizes problem as above, so the same
         // 'settle it on the next entry' handling.
+        // The Master Edition's extra monsters, for the Randomizer to borrow. Sprites only: their names are kept, since
+        // the games that lack them have nothing under those names to collide with. See 'MasterMonsters.h'.
+        std::vector<LumpName8> monsterNames;
+        std::vector<int32_t> monsterOffsets;
+        std::vector<int32_t> monsterUnpackedSizes;
+        std::vector<int32_t> monsterRawSizes;
+        std::vector<bool> bMonsterCompressed;
+        bool bMonsterPending = false;
+
         std::vector<LumpName8> playNames;
         std::vector<int32_t> playOffsets;
         std::vector<int32_t> playUnpackedSizes;
@@ -527,6 +929,11 @@ bool probeDisc(const char* const cuePath, const MenuArt& menuArt, const int32_t 
             if (bPlayPending) {
                 playRawSizes.back() = lump.offset - playOffsets.back();
                 bPlayPending = false;
+            }
+
+            if (bMonsterPending) {
+                monsterRawSizes.back() = lump.offset - monsterOffsets.back();
+                bMonsterPending = false;
             }
 
             // Names are eight characters, padded rather than terminated, and the top bit of the first marks compression
@@ -554,6 +961,43 @@ bool probeDisc(const char* const cuePath, const MenuArt& menuArt, const int32_t 
                     bSsgCompressed[frameIdx] = bCompressed;
                     numSsgFramesFound++;
                     pendingSsgFrame = frameIdx;     // Its occupied size is settled by whatever entry comes next
+                }
+            }
+
+            // The Master Edition's extra monsters.
+            //
+            // Matched on the four character sprite name followed by a frame letter and a rotation digit, the way the
+            // sprite scanner reads them - so 'VILEA1' is taken and anything that merely starts with those letters is
+            // not. Only worth collecting off the disc that has them.
+            if (ssgStyle == SsgStyle::STYLE_MASTER) {
+                bool bIsMonsterSprite = false;
+
+                for (int mi = 0; mi < MasterMonsters::NUM_SPRITE_NAMES; ++mi) {
+                    if (std::strncmp(name, MasterMonsters::SPRITE_NAMES[mi], 4) != 0)
+                        continue;
+
+                    const char frameChar = name[4];
+                    const char rotChar = name[5];
+                    const bool bFrameOk = ((frameChar >= 'A') && (frameChar <= '_'));
+                    const bool bRotOk = ((rotChar >= '0') && (rotChar <= '8'));
+
+                    if (bFrameOk && bRotOk) {
+                        bIsMonsterSprite = true;
+                    }
+
+                    break;
+                }
+
+                if (bIsMonsterSprite) {
+                    monsterNames.emplace_back();
+                    std::memcpy(monsterNames.back().chars, lump.name, 8);
+                    monsterNames.back().chars[0] = (char)(monsterNames.back().chars[0] & 0x7F);
+
+                    monsterOffsets.push_back(lump.offset);
+                    monsterUnpackedSizes.push_back(lump.size);
+                    monsterRawSizes.push_back(lump.size);
+                    bMonsterCompressed.push_back(bCompressed);
+                    bMonsterPending = true;
                 }
             }
 
@@ -609,6 +1053,10 @@ bool probeDisc(const char* const cuePath, const MenuArt& menuArt, const int32_t 
                 bPlayPending = false;   // Already holds the unpacked size, which is the right answer when uncompressed
             }
 
+            if (bMonsterPending) {
+                bMonsterPending = false;
+            }
+
             if (numSsgFramesFound == SsgStyle::NUM_FRAMES) {
                 const char* const pSpriteName = SsgStyle::spriteName((SsgStyle::Style) ssgStyle);
 
@@ -623,6 +1071,47 @@ bool probeDisc(const char* const cuePath, const MenuArt& menuArt, const int32_t 
             } else {
                 assetLog("launcher assets:   super shotgun has only %d of %d frames - not written",
                     (int) numSsgFramesFound, (int) SsgStyle::NUM_FRAMES);
+            }
+
+            // The Master Edition's extra monsters, copied as they are.
+            //
+            // Byte for byte, compression flag and all: unlike the recoloured marines nothing is being changed here, so
+            // there is nothing to unpack and nothing to pack again.
+            if (!monsterOffsets.empty()) {
+                const bool bWroteMonsters = writeCopiedSpriteWad(
+                    discReader, pWadEntry->startLba, MasterMonsters::wadPath(),
+                    monsterNames, monsterOffsets, monsterUnpackedSizes, monsterRawSizes, bMonsterCompressed
+                );
+
+                assetLog(
+                    "launcher assets:   %d Master Edition monster lumps, written=%s",
+                    (int) monsterOffsets.size(), bWroteMonsters ? "yes" : "NO"
+                );
+
+                // Broken down by sprite, because the roster fails per monster rather than all at once. A count of zero
+                // against 'VILE' is "there will be no Arch-Vile"; the total alone would only say something was short.
+                for (int mi = 0; mi < MasterMonsters::NUM_SPRITE_NAMES; ++mi) {
+                    int32_t numFrames = 0;
+                    int32_t numBytes = 0;
+
+                    for (size_t li = 0; li < monsterNames.size(); ++li) {
+                        if (std::strncmp(monsterNames[li].chars, MasterMonsters::SPRITE_NAMES[mi], 4) == 0) {
+                            numFrames++;
+                            numBytes += monsterRawSizes[li];
+                        }
+                    }
+
+                    assetLog(
+                        "launcher assets:     %s - %d frames, %d KiB%s",
+                        MasterMonsters::SPRITE_NAMES[mi], (int) numFrames, (int) (numBytes / 1024),
+                        (numFrames == 0) ? "  <-- NONE FOUND" : ""
+                    );
+                }
+            }
+
+            // And what it takes to hear them, which is not simply their samples - see 'buildMasterSoundCache'
+            if (ssgStyle == SsgStyle::STYLE_MASTER) {
+                buildMasterSoundCache(discReader, fileSys);
             }
 
             // The recoloured marines, for telling players apart

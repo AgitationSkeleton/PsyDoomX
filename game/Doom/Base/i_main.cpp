@@ -73,6 +73,18 @@
             WriteFile(h, "\r\n", 2, &w, nullptr);
             CloseHandle(h);
         }
+
+        // And over the relay, so it can actually be read.
+        //
+        // The file alone is not enough for anything the launcher says. Both processes write 'bootlog.txt' and each
+        // truncates it on its first write, so starting a game destroys everything the launcher recorded - which is all
+        // of the cross-edition asset work: the borrowed super shotgun, the recoloured marines, the Master Edition's
+        // monsters and their sound module. Those are exactly the lines worth having when something in that path goes
+        // wrong, and until now they were gone by the time anyone could look.
+        //
+        // Costs a formatted write into a fixed slot and an atomic increment on this thread; the sending is somebody
+        // else's problem. Inert when nothing is listening.
+        XboxLog::logf(XboxLog::Sys::General, XboxLog::Sev::Info, "%s", msg);
     }
     #define DOOM_STEP(msg) xbLog(msg)
 #else

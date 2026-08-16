@@ -9,6 +9,7 @@
 #include "PsyDoom/Game.h"
 #include "PsyDoom/Input.h"
 #include "PsyDoom/IntroLogos.h"
+#include "PsyDoom/MasterMonsters.h"
 #include "PsyDoom/ModMgr.h"
 #include "PsyDoom/PlayerPrefs.h"
 #include "PsyDoom/ProgArgs.h"
@@ -118,11 +119,46 @@ int psx_main(const int argc, const char* const* const argv) noexcept {
         XBOX_STEP("CdMapTbl_Init");
         CdMapTbl_Init();
 
+        // PsyDoom Xbox: stand the Master Edition's sound module in for this game's, if the launcher cached one.
+        //
+        // This is what lets the borrowed Arch-Vile, Wolfenstein SS and Keen be heard rather than merely drawn: their
+        // sounds are sequences a Doom or Final Doom module does not define, so the samples alone would have nothing to
+        // trigger them. Substituted through the ordinary file override system by pointing it at the cache directory.
+        //
+        // Has to happen before 'ModMgr::init' and before sound starts, since the module is read once and never again.
+        //
+        // Not portable: depends on the launcher, which exists because this console needs one.
+        #if defined(__XBOX__)
+            MasterMonsters::initSounds();
+
+            if (const char* const soundDir = MasterMonsters::soundOverrideDirPath()) {
+                ProgArgs::gDataDirPath = soundDir;
+            }
+        #endif
+
         // Initialize the display, modding manager, cheats and intro logos
         XBOX_STEP("Video::initVideo");
         Video::initVideo();
         XBOX_STEP("ModMgr::init");
         ModMgr::init();
+
+        // PsyDoom Xbox: name the two borrowed sound files as overrides, since nothing here can go looking for them.
+        //
+        // 'ModMgr::init' discovers overrides by iterating the data directory, which this port cannot do - nxdk's
+        // libc++ has no '<filesystem>' and no dirent shim, so that search returns immediately and the override set
+        // stays empty. Pointing 'gDataDirPath' at the cache is therefore not by itself enough: without this the module
+        // substitution silently did nothing and went on using the disc's own, and opening 'MEMONST.LCD' fell through
+        // to the CD file table and raised a fatal error, because it is not a file on any disc.
+        //
+        // Registered after 'init' rather than before, because 'init' clears the set.
+        #if defined(__XBOX__)
+            if (MasterMonsters::haveBorrowedSounds()) {
+                ModMgr::addFileOverride("DOOMSND.WMD");
+                ModMgr::addFileOverride(MasterMonsters::monsterSoundLcdName());
+
+                MasterMonsters::logSoundOverrides();
+            }
+        #endif
         XBOX_STEP("Cheats::init");
         Cheats::init();
         XBOX_STEP("IntroLogos::init");

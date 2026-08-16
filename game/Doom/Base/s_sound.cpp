@@ -3,6 +3,7 @@
 #include "Doom/cdmaptbl.h"
 #include "Doom/Game/doomdata.h"
 #include "Doom/Game/g_game.h"
+#include "Doom/Game/p_setup.h"
 #include "Doom/Renderer/r_local.h"
 #include "Doom/Renderer/r_main.h"
 #include "EngineLimits.h"
@@ -12,6 +13,13 @@
 #include "PsyDoom/Config/Config.h"
 #include "PsyDoom/DiscInfo.h"
 #include "PsyDoom/Game.h"
+#include "PsyDoom/MasterMonsters.h"
+#include "PsyDoom/Randomizer.h"
+#include "PsyDoom/XboxLog.h"
+
+#include <SDL.h>
+#include <chrono>
+
 #include "PsyDoom/IsoFileSys.h"
 #include "PsyDoom/MapInfo/MapInfo.h"
 #include "PsyDoom/ModMgr.h"
@@ -126,6 +134,172 @@ static int32_t gLoadedSoundAndMusMapNum;
 // Addresses before this are for SPU reserved RAM (roughly 4 KiB) and for the common/base sfx LCD file, 'DOOMSFX.LCD'.
 // That LCD contains UI and player sounds and is almost always kept in SPU memory and not unloaded, except during the finale.
 static uint32_t gSound_MapLcdSpuStartAddr = SPU_RAM_APP_BASE;
+
+#if PSYDOOM_MODS
+//------------------------------------------------------------------------------------------------------------------------------------------
+// PsyDoom: every monster sound in the game, held for the Randomizer.
+//
+// A map's LCD holds only the samples that map needs, so a monster randomized into a map that never had one is silent -
+// which is most of them. The fix is to have every sample resident instead of just that map's.
+//
+// Done by loading each map's LCD in turn rather than by building a combined file. Two things about the format make
+// that work out exactly right: a patch sample index means the same thing everywhere in a game, and a sample's length
+// comes from the module rather than the LCD, so a sample already loaded is skipped instead of stored twice. Loading
+// all of them therefore costs the union rather than the sum.
+//
+// It is loaded once and left alone after that. This sits immediately after 'DOOMSFX.LCD' and the start address for
+// everything else is moved past it, so per map music and sounds load after it and never land on top of it.
+//------------------------------------------------------------------------------------------------------------------------------------------
+// A millisecond clock of our own: 'ScreenPerf3DS' keeps its one to itself
+// A millisecond clock.
+//
+// 'SDL_GetTicks' rather than 'std::chrono': this console does not advance the latter dependably, which has already
+// stopped the music sequencer and skewed the view interpolation elsewhere in this port.
+static int64_t S_NowMs() noexcept {
+    return (int64_t) SDL_GetTicks();
+}
+
+// As many patch samples as any module in the game defines, with room to spare
+static constexpr int32_t MAX_PATCH_SAMPLES = 512;
+
+static SampleBlock  gRandomizerSndBlock;
+static bool         gbLoadedRandomizerSounds = false;
+static uint32_t     gRandomizerSoundsEndAddr = 0;
+
+static void S_LoadAllMonsterSounds() noexcept {
+    // Already done, and nothing has moved underneath it? Then there is nothing to do.
+    //
+    // Compared against the address this finished at rather than the one it started at, because finishing is what moves
+    // the start address for everything else. Getting that the wrong way round read every LCD in the game again on
+    // every level, loading nothing.
+    if (gbLoadedRandomizerSounds && (gSound_MapLcdSpuStartAddr == gRandomizerSoundsEndAddr))
+        return;
+
+    const uint32_t baseAddr = gSound_MapLcdSpuStartAddr;
+    const int32_t numMaps = Game::getNumMaps();
+
+    // How long this takes matters: it is one file read per map, and on real hardware that is the bulk of the first
+    // level load rather than the rounding error it looks like on an emulator.
+        const int64_t startMs = S_NowMs();
+
+    // First work out which files are actually worth reading.
+    //
+    // Every map's LCD begins with one sector saying which samples it holds, and most maps hold the same handful as
+    // their neighbours - the whole game only uses about sixty distinct monster samples. Reading two kilobytes per map
+    // to avoid reading a hundred is the difference between this taking a moment and taking the best part of a minute:
+    // measured at eleven seconds for all of them even on an emulator, and it was the bulk of a fifty two second level
+    // load on a real console.
+    //
+    // Greedy rather than optimal: a file is taken if it holds anything not already accounted for. That is not the
+    // smallest possible set of files, but it is close and it is one pass.
+    bool bHaveSample[MAX_PATCH_SAMPLES] = {};
+    std::vector<CdFileId> lcdsToLoad;
+
+    for (int32_t mapNum = 1; mapNum <= numMaps; ++mapNum) {
+        const CdFileId lcdFileId = S_GetSoundLcdFileId(mapNum);
+
+        if (lcdFileId == CdFileId{})
+            continue;
+
+        PsxCd_File* const pFile = psxcd_open(lcdFileId);
+
+        if (!pFile)
+            continue;
+
+        // The header sector: a count, then that many patch sample indices
+        uint16_t header[1024] = {};
+        const int32_t bytesRead = psxcd_read(header, sizeof(header), *pFile);
+        psxcd_close(*pFile);
+
+        if (bytesRead < (int32_t) sizeof(uint16_t))
+            continue;
+
+        const int32_t numSamples = std::min<int32_t>(header[0], 1023);
+        bool bAddsSomething = false;
+
+        for (int32_t i = 1; i <= numSamples; ++i) {
+            const uint16_t sampleIdx = header[i];
+
+            if ((sampleIdx < MAX_PATCH_SAMPLES) && (!bHaveSample[sampleIdx])) {
+                bAddsSomething = true;
+                break;
+            }
+        }
+
+        if (!bAddsSomething)
+            continue;
+
+        for (int32_t i = 1; i <= numSamples; ++i) {
+            const uint16_t sampleIdx = header[i];
+
+            if (sampleIdx < MAX_PATCH_SAMPLES) {
+                bHaveSample[sampleIdx] = true;
+            }
+        }
+
+        lcdsToLoad.push_back(lcdFileId);
+    }
+
+    uint32_t destSpuAddr = baseAddr;
+    int32_t numLoaded = 0;
+
+    for (const CdFileId lcdFileId : lcdsToLoad) {
+        // 'false' for override: a sample that another map already supplied is skipped rather than stored again
+        const int32_t bytesWritten = wess_dig_lcd_load(lcdFileId, destSpuAddr, &gRandomizerSndBlock, false);
+
+        destSpuAddr += (uint32_t) bytesWritten;
+        numLoaded++;
+    }
+
+    // And the Master Edition's own monsters, if the launcher borrowed them.
+    //
+    // Only here, rather than beside the rest of the borrowing: these samples are of no use to a game that will never
+    // spawn an Arch-Vile, so they are only spent when the mode that can is being played. What makes them audible at all
+    // is the substituted sound module set up back in 'psx_main' - without that the samples would be resident but no
+    // sequence would name them. See 'MasterMonsters.h'.
+    int32_t borrowedBytes = 0;
+
+    #if defined(__XBOX__)
+        if (MasterMonsters::haveBorrowedSounds()) {
+            borrowedBytes = wess_dig_lcd_load(
+                MasterMonsters::monsterSoundLcdName(),
+                destSpuAddr,
+                &gRandomizerSndBlock,
+                false
+            );
+
+            destSpuAddr += (uint32_t) borrowedBytes;
+        }
+    #endif
+
+    // Everything else starts after it, so that a map's own music and sounds cannot overwrite it
+    gSound_MapLcdSpuStartAddr = destSpuAddr;
+    gRandomizerSoundsEndAddr = destSpuAddr;
+    gbLoadedRandomizerSounds = true;
+
+    XBOX_LOGI(General,
+        "Randomizer - Sounds: %d KiB of monster samples from %d of %d maps, plus %d KiB borrowed (%s) - took %lldms",
+        (int) ((destSpuAddr - baseAddr - (uint32_t) borrowedBytes) / 1024),
+        (int) numLoaded,
+        (int) numMaps,
+        (int) (borrowedBytes / 1024),
+        (borrowedBytes > 0) ? "Arch-Vile, SS and Keen can be heard" : "none: no Master Edition",
+        (long long) (S_NowMs() - startMs)
+    );
+
+    // What that cost against what there is. Loading the union of every map's sounds only works on a build with room
+    // for it, and running out is not a crash - the loader stops partway, sets a startup warning and carries on, so a
+    // console that is short shows a line of red text and then sounds subtly wrong for the rest of the level. Stating
+    // the budget here means the next such report can be read against a number instead of guessed at.
+    XBOX_LOGI(General,
+        "Randomizer - Sound RAM: %d KiB used of %d KiB (%d KiB free)%s",
+        (int) (destSpuAddr / 1024),
+        (int) (gPsxSpu_sram_end / 1024),
+        (int) ((gPsxSpu_sram_end > destSpuAddr) ? (gPsxSpu_sram_end - destSpuAddr) / 1024 : 0),
+        (gLevelStartupWarning[0]) ? "  <-- WARNING RAISED, some sounds were dropped" : ""
+    );
+}
+#endif  // PSYDOOM_MODS
 
 // Sample blocks for general DOOM sounds and map specific music and sfx sounds
 static SampleBlock gDoomSndBlock;
@@ -363,9 +537,25 @@ void S_LoadMapSoundAndMusic(const int32_t mapNum) noexcept {
         }
     }
 
+    // PsyDoom: for the Randomizer, get every monster sound in the game resident before anything else is placed.
+    //
+    // Before the music and the map's own sounds because those change from map to map: putting this first and moving
+    // the start address past it means it is loaded once and stays where it was put.
+    #if PSYDOOM_MODS
+        if (Randomizer::gbEnabled && (!bIsFinale) && (mapNum > 0)) {
+            S_LoadAllMonsterSounds();
+        }
+    #endif
+
     // Get the settings for the map's music
     const MapInfo::Map* const pMap = MapInfo::getMap(mapNum);
-    const int32_t mapMusicTrack = (pMap) ? pMap->music : 0;
+
+    // PsyDoom: the Randomizer plays something else, chosen from what the running game has
+    #if PSYDOOM_MODS
+        const int32_t mapMusicTrack = Randomizer::chooseMusicTrack((pMap) ? pMap->music : 0);
+    #else
+        const int32_t mapMusicTrack = (pMap) ? pMap->music : 0;
+    #endif
     const SpuReverbMode mapReverbMode = (pMap) ? pMap->reverbMode : SpuReverbMode::SPU_REV_MODE_OFF;
     const int16_t mapReverbDepthL = (pMap) ? pMap->reverbDepthL : 0;
     const int16_t mapReverbDepthR = (pMap) ? pMap->reverbDepthR : 0;
@@ -437,6 +627,13 @@ void S_LoadMapSoundAndMusic(const int32_t mapNum) noexcept {
         } else if (mapNum > 0) {
             mapSoundLcdFileId = S_GetSoundLcdFileId(mapNum);    // Normal map LCD
         }
+
+        // PsyDoom: with every monster sound already resident this would only reload a subset of what is there
+        #if PSYDOOM_MODS
+            if (Randomizer::gbEnabled && gbLoadedRandomizerSounds) {
+                mapSoundLcdFileId = CdFileId{};
+            }
+        #endif
 
         if (mapSoundLcdFileId != CdFileId{}) {
             wess_dig_lcd_load(mapSoundLcdFileId, destSpuAddr, &gMapSndBlock, false);
@@ -832,6 +1029,16 @@ void PsxSoundInit(const int32_t sfxVol, const int32_t musVol, void* const pTmpWm
 
     // Initialize the music sequence and LCD (samples file) loaders
     master_status_structure& mstat = *wess_get_master_status();
+
+    // PsyDoom 3DS: say which module was actually loaded.
+    //
+    // The only way to see whether the borrowed one took: a game's own module stops at 110 sequences on Doom and 120 on
+    // Final Doom, and the reimplemented monsters need up to 135. Nothing else about the game looks any different.
+        XBOX_LOGI(General, 
+            "sound: module has %d sequences (%s reimplemented monster sounds, which need 136)",
+            (int) mstat.pmodule->hdr.num_sequences,
+            (mstat.pmodule->hdr.num_sequences >= 136) ? "enough for the" : "NOT enough for the"
+        );
     wess_dig_lcd_loader_init(&mstat);
     wess_seq_loader_init(&mstat, CdFile::DOOMSND_WMD, true);
 

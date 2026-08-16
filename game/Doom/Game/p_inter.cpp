@@ -1,3 +1,4 @@
+#include "p_enemy.h"
 #include "p_inter.h"
 
 #include "Asserts.h"
@@ -16,6 +17,7 @@
 #include "p_pspr.h"
 #include "p_spec.h"
 #include "PsyDoom/Game.h"
+#include "PsyDoom/Randomizer.h"
 
 #if defined(__XBOX__)
     #include "PsyDoom/Splitscreen.h"
@@ -966,6 +968,19 @@ void P_KillMobj(mobj_t* const pKiller, mobj_t& target) noexcept {
         mobj_t& droppedItem = *P_SpawnMobj(target.x, target.y, ONFLOORZ, dropItemType);
         droppedItem.flags |= MF_DROPPED;    // Less ammo for picking up dropped items
     }
+
+    // PsyDoom: a randomized thing still owes the map whatever special it inherited.
+    //
+    // 'A_BossDeath' is normally reached from a frame of a particular monster's death animation, so a Mancubus that
+    // became something else would never call it and Dead Simple would never open. The Randomizer keeps such things
+    // killable, so all that is needed is to make the call here; the check inside is keyed on what the thing started
+    // out as, and is harmless for anything else. Only for things that actually changed - anything else reaches it
+    // through its own death animation as it always did.
+    #if PSYDOOM_MODS
+        if (Randomizer::gbEnabled && (target.type != Randomizer::originalTypeOf(target))) {
+            A_BossDeath(target);
+        }
+    #endif
 }
 
 //------------------------------------------------------------------------------------------------------------------------------------------

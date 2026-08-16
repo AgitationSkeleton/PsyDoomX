@@ -13,8 +13,15 @@ You bring your own game disc. Nothing from a retail game ships here.
   PlayStation game only ever had link cable multiplayer between two machines.
 - **A launcher** that finds whichever games are installed and starts them, wearing the menu of
   whichever one you pick - its background, its font, its music and its sounds, read out of the disc.
+- **A Randomizer mode**, listed after Singleplayer, Cooperative and Deathmatch. Every monster, item and
+  pickup in the level is rolled for something else that fits where it stands, along with the sky and the
+  music. It only ever places what the running game can actually draw, so nothing turns into a missing
+  sprite.
 - **Cross edition super shotgun sprites.** Doom's and Final Doom's are different art. Carry either, per
   player, and it changes in your hands.
+- **The Master Edition's monsters in the other games.** If you have it installed, the Randomizer can put
+  the Arch-Vile, the Wolfenstein SS and Commander Keen into Doom and Final Doom, with their own sounds.
+  Without it those three are simply left out of the roster.
 - **Player colours**, the way PC Doom does them - green, indigo, brown and red - so two marines can be
   told apart. Per player, and it follows the body.
 - **Named levels**, optionally. The cooperative and deathmatch level select can read `MAP24: Hell

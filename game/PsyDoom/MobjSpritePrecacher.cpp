@@ -22,6 +22,10 @@
 BEGIN_NAMESPACE(MobjSpritePrecacher)
 
 static std::vector<bool>    gbCacheSprite;          // Whether to precache each sprite in the game
+
+// What the last precache came to. A lump drawn for every direction is only counted once, since it is only cached once.
+static int64_t  gLastPrecachedBytes = 0;
+static int32_t  gLastPrecachedLumps = 0;
 static std::vector<bool>    gbCachedMobjType;       // Whether sprites were precached for each 'mobjtype_t'
 
 //------------------------------------------------------------------------------------------------------------------------------------------
@@ -193,6 +197,9 @@ static void flagSpritesToPrecache() noexcept {
 // Precaches all sprites that are flagged for precaching
 //------------------------------------------------------------------------------------------------------------------------------------------
 static void precacheSprites() noexcept {
+    // The lump counted last, so a frame drawn for every direction is only weighed once - it names the same lump eight
+    // times and is only cached once.
+    int32_t lastLumpIdx = -1;
     // How many sprite lumps are there?
     const int32_t numSprites = gNumSprites;
 
@@ -213,6 +220,13 @@ static void precacheSprites() noexcept {
                     I_Error("SprCache: bad lump num %d!", sprLumpIdx);
                 }
 
+                // Only count a lump the first time: a frame drawn for every direction names the same one eight times
+                if (sprLumpIdx != lastLumpIdx) {
+                    lastLumpIdx = sprLumpIdx;
+                    gLastPrecachedBytes += W_LumpLength(sprLumpIdx);
+                    gLastPrecachedLumps++;
+                }
+
                 W_CacheLumpNum(sprLumpIdx, PU_CACHE, false);
             }
         }
@@ -223,9 +237,20 @@ static void precacheSprites() noexcept {
 // Called near the end of level setup to precache all the sprites needed for the map
 //------------------------------------------------------------------------------------------------------------------------------------------
 void doPrecaching() noexcept {
+    gLastPrecachedBytes = 0;
+    gLastPrecachedLumps = 0;
+
     clearPrecacheInfo();
     flagSpritesToPrecache();
     precacheSprites();
+}
+
+int64_t getLastPrecachedBytes() noexcept {
+    return gLastPrecachedBytes;
+}
+
+int32_t getLastPrecachedLumps() noexcept {
+    return gLastPrecachedLumps;
 }
 
 END_NAMESPACE(MobjSpritePrecacher)
