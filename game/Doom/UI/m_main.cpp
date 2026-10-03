@@ -18,6 +18,7 @@
 #include "PsyDoom/MapInfo/GecMapInfo.h"
 #include "PsyDoom/MapInfo/MapInfo.h"
 #include "PsyDoom/Network.h"
+#include "PsyDoom/ProgArgs.h"
 #include "PsyDoom/PsxPadButtons.h"
 #include "PsyDoom/Utils.h"
 #include "PsyQ/LIBGPU.h"
@@ -120,12 +121,24 @@ static const char gGameTypeNames[NUMGAMETYPES][16] = {
 static constexpr int32_t MENU_MODE_RANDOMIZER = NUMGAMETYPES;
 static const char gRandomizerModeName[] = "Randomizer";
 
-// Where the selector is, rather than what the game type is: the two differ only at the last position
+// And Coop Rando one past that: a cooperative game with the Randomizer on.
+//
+// Co-op as a game type, so everything that is multiplayer behaves as it does in co-op - the second view comes up, both
+// players respawn, the intermission counts both - and the Randomizer as the same flag the single player mode uses. Both
+// players play the one rolled level, since there is one world between them.
+static constexpr int32_t MENU_MODE_COOP_RANDO = NUMGAMETYPES + 1;
+static constexpr int32_t MENU_MODE_LAST = MENU_MODE_COOP_RANDO;
+static const char gCoopRandoModeName[] = "Coop Rando";
+
+// Where the selector is, rather than what the game type is: the two differ at the last two positions
 static int32_t gMenuGameMode = 0;
 
 static void ApplyMenuGameMode() noexcept {
     if (gMenuGameMode == MENU_MODE_RANDOMIZER) {
         gStartGameType = gt_single;
+        Randomizer::setEnabled(true);
+    } else if (gMenuGameMode == MENU_MODE_COOP_RANDO) {
+        gStartGameType = gt_coop;
         Randomizer::setEnabled(true);
     } else {
         gStartGameType = (gametype_t) gMenuGameMode;
@@ -134,7 +147,13 @@ static void ApplyMenuGameMode() noexcept {
 }
 
 static const char* MenuGameModeName() noexcept {
-    return (gMenuGameMode == MENU_MODE_RANDOMIZER) ? gRandomizerModeName : gGameTypeNames[gStartGameType];
+    if (gMenuGameMode == MENU_MODE_RANDOMIZER)
+        return gRandomizerModeName;
+
+    if (gMenuGameMode == MENU_MODE_COOP_RANDO)
+        return gCoopRandoModeName;
+
+    return gGameTypeNames[gStartGameType];
 }
 
 static const char gSkillNames[NUMSKILLS][16] = {
@@ -503,6 +522,17 @@ gameaction_t RunMenu() noexcept {
         #endif
 
         if (bStartGame) {
+            // Start whatever the selector says, as it says it now.
+            //
+            // The game type and the Randomizer were only ever set when the selector moved. A demo turns the Randomizer
+            // off - it has to, or the recording would desync - and the attract loop runs demos between visits to this
+            // menu, so after one the selector could still read 'Randomizer' over a game that started without it.
+            //
+            // Not for a network client, which has just been told the game type by the server and must keep it.
+            if (!ProgArgs::gbIsNetClient) {
+                ApplyMenuGameMode();
+            }
+
             // Two player games on this console are splitscreen rather than link cable.
             //
             // This is where the other console used to be searched for, so it is where the second view is brought up:
@@ -807,11 +837,11 @@ gameaction_t M_Ticker() noexcept {
 
         if (bAllowMultiplayer) {
             if (bMenuRight) {
-                if (gMenuGameMode < MENU_MODE_RANDOMIZER) {
+                if (gMenuGameMode < MENU_MODE_LAST) {
                     gMenuGameMode++;
                     ApplyMenuGameMode();
 
-                    // Both co-op and the Randomizer start from the first map rather than wherever the previous mode was
+                    // Co-op and both Randomizer modes start from the first map rather than wherever the previous mode was
                     if ((gStartGameType == gt_coop) || Randomizer::gbEnabled) {
                         gStartMapOrEpisode = 1;
                     }

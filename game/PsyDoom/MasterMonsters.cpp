@@ -3,6 +3,7 @@
 #if defined(__XBOX__)
 
 #include "WadList.h"
+#include "XboxPaths.h"
 
 #include <windows.h>
 
@@ -19,8 +20,17 @@ BEGIN_NAMESPACE(MasterMonsters)
 const char* const SPRITE_NAMES[] = { "VILE", "FIRE", "SSWV", "KEEN" };
 const int NUM_SPRITE_NAMES = (int)(sizeof(SPRITE_NAMES) / sizeof(SPRITE_NAMES[0]));
 
-static constexpr const char* WAD_PATH   = "E:\\Apps\\PsyDoomX\\cache\\memonsters.wad";
-static constexpr const char* SOUND_DIR  = "E:\\Apps\\PsyDoomX\\cache\\sound";
+// Beside the executable, wherever that is - see 'XboxPaths.h'
+static const char* wadFilePath() noexcept {
+    static char path[260];
+    return XboxPaths::make(path, sizeof(path), "cache\\memonsters.wad");
+}
+
+static const char* soundDir() noexcept {
+    static char path[260];
+    return XboxPaths::make(path, sizeof(path), "cache\\sound");
+}
+
 static constexpr const char* WMD_NAME   = "DOOMSND.WMD";
 static constexpr const char* LCD_NAME   = "MEMONST.LCD";
 
@@ -28,11 +38,11 @@ static bool gbLoaded = false;
 static bool gbHaveSounds = false;
 
 const char* wadPath() noexcept {
-    return WAD_PATH;
+    return wadFilePath();
 }
 
 const char* soundDirPath() noexcept {
-    return SOUND_DIR;
+    return soundDir();
 }
 
 const char* monsterSoundLcdName() noexcept {
@@ -62,8 +72,8 @@ void initSounds() noexcept {
     int32_t wmdSize = 0;
     int32_t lcdSize = 0;
 
-    const bool bHaveWmd = fileSize(SOUND_DIR, WMD_NAME, wmdSize);
-    const bool bHaveLcd = fileSize(SOUND_DIR, LCD_NAME, lcdSize);
+    const bool bHaveWmd = fileSize(soundDir(), WMD_NAME, wmdSize);
+    const bool bHaveLcd = fileSize(soundDir(), LCD_NAME, lcdSize);
 
     gbHaveSounds = (bHaveWmd && bHaveLcd);
 
@@ -75,7 +85,7 @@ void initSounds() noexcept {
                      : "ABSENT, those three will be silent",
         WMD_NAME, bHaveWmd ? "ok" : "MISSING", (int) wmdSize,
         LCD_NAME, bHaveLcd ? "ok" : "MISSING", (int) lcdSize,
-        SOUND_DIR
+        soundDir()
     );
     xbLog(msg);
 }
@@ -90,7 +100,7 @@ void logSoundOverrides() noexcept {
     // fault that shows up later as a fatal error in the middle of a level load.
     for (const char* const name : { WMD_NAME, LCD_NAME }) {
         char path[260];
-        std::snprintf(path, sizeof(path), "%s\\%s", SOUND_DIR, name);
+        std::snprintf(path, sizeof(path), "%s\\%s", soundDir(), name);
 
         std::FILE* const pFile = std::fopen(path, "rb");
         const bool bOpened = (pFile != nullptr);
@@ -109,7 +119,7 @@ void logSoundOverrides() noexcept {
 }
 
 const char* soundOverrideDirPath() noexcept {
-    return (gbHaveSounds) ? SOUND_DIR : nullptr;
+    return (gbHaveSounds) ? soundDir() : nullptr;
 }
 
 bool isLoaded() noexcept {
@@ -123,26 +133,26 @@ void addOverrideWad(WadList& wadList) noexcept {
     // without the Master Edition installed would die on startup rather than simply going without the monsters.
     WIN32_FILE_ATTRIBUTE_DATA attrs = {};
 
-    if (!GetFileAttributesExA(WAD_PATH, GetFileExInfoStandard, &attrs)) {
+    if (!GetFileAttributesExA(wadFilePath(), GetFileExInfoStandard, &attrs)) {
         char msg[256];
         std::snprintf(
             msg, sizeof(msg),
             "master monsters: sprites not cached at '%s' - the Arch-Vile, Wolfenstein SS and Keen will be absent from "
             "the roster (run the launcher once with a Master Edition disc configured to build this)",
-            WAD_PATH
+            wadFilePath()
         );
         xbLog(msg);
         return;
     }
 
-    wadList.add(WAD_PATH);
+    wadList.add(wadFilePath());
     gbLoaded = true;
 
     char msg[256];
     std::snprintf(
         msg, sizeof(msg),
         "master monsters: sprites loaded from '%s' (%d bytes) - the Arch-Vile, Wolfenstein SS and Keen are available",
-        WAD_PATH, (int) attrs.nFileSizeLow
+        wadFilePath(), (int) attrs.nFileSizeLow
     );
     xbLog(msg);
 }

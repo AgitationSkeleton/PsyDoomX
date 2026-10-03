@@ -29,6 +29,7 @@
 #include "PsyDoom/DemoPlayer.h"
 #include "PsyDoom/DemoRecorder.h"
 #include "PsyDoom/Game.h"
+#include "PsyDoom/Randomizer.h"
 #if defined(__XBOX__)
     #include "PsyDoom/PlayerColour.h"
 #endif
@@ -390,6 +391,12 @@ void G_DoReborn(const int32_t playerIdx) noexcept {
 
     // Spawn the player
     P_SpawnPlayer(*pChosenSpawnPt);
+
+    // PsyDoom: Coop Rando - a player coming back mid level gets a weapon to face the rolled level with, as they did at
+    // its start, rather than a pistol. Does nothing while the level is being set up, or outside the Randomizer.
+    #if PSYDOOM_MODS
+        Randomizer::grantRespawnWeapon(playerIdx);
+    #endif
 
     // Restore all cooperative starts back to having their previous type, if we modified them.
     // The co-op spawn logic assumes the type is correct for the corresponding player index.

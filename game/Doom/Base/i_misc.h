@@ -58,4 +58,14 @@ void I_UpdatePalette() noexcept;
     int32_t I_GetStringWidth(const char* const str) noexcept;
 #endif
 
+#if defined(__XBOX__)
+    // Which character of the big font to draw for 'c' in the running game.
+    //
+    // Doom Forever is a Russian translation, and its big font has Cyrillic letters drawn into the slots for capitals -
+    // which is how the Russian game spelled its menus. PsyDoom's menus are written in English, so in Doom Forever they
+    // came out as Cyrillic nonsense. The lower case slots kept their Latin letters, which PSX Doom draws as small
+    // capitals, so in that game everything is drawn with those. Every other game is untouched.
+    char I_BigFontChar(const char c) noexcept;
+#endif
+
 void I_DrawString(const int32_t x, const int32_t y, const char* const str) noexcept;

@@ -203,6 +203,15 @@ inline bool gShowFullOverlay = false;
 // Just the frame rate. On, because the whole point of the current work is the frame rate and it wants watching.
 inline bool gShowFpsOverlay = false;
 
+// Has the game put its first frame on screen?
+//
+// Until then, startup writes its progress straight onto the screen with nxdk's text output, so a console that hangs on
+// the way up says where. Those lines start at the left edge, and the game's picture is 512 wide in a 640 wide screen -
+// it never writes the 64 columns either side of it, so whatever was printed there stayed for the whole session, showing
+// as clipped words down the left hand bar. The first frame clears the whole screen and sets this, and nothing prints to
+// the screen after that.
+inline bool gbGameOwnsScreen = false;
+
 // Include the frame time beside the rate.
 //
 // Separate from showing the rate at all because they answer different questions: a player wants to know it is smooth,

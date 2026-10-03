@@ -11,6 +11,7 @@
 #include "FatalErrors.h"
 #include "IsoFileSys.h"
 #include "MapInfo/MapInfo.h"
+#include "PlayerPrefs.h"
 #include "ProgArgs.h"
 #include "PsxVm.h"
 #include "Utils.h"
@@ -162,6 +163,18 @@ void determineGameTypeAndVariant() noexcept {
 
     // Populate constants that vary from game to game
     gConstants.populate(gGameType, gbIsDemoVersion);
+
+    // Doom Forever's saves and password are its own.
+    //
+    // It plays as Final Doom, so it took Final Doom's save file names and password slot as well - and on a console with
+    // both, each game's saves were the other's, and loading one put a Final Doom game in Doom Forever's maps or the
+    // reverse. Upstream never had to care, since a PC install holds one game per folder; here every game shares one.
+    #if defined(__XBOX__)
+        if (gbIsPsxDoomForever) {
+            gConstants.saveFilePrefix = "DForever_";
+            gConstants.pLastPasswordField = &PlayerPrefs::gLastPassword_Forever;
+        }
+    #endif
 }
 
 //------------------------------------------------------------------------------------------------------------------------------------------

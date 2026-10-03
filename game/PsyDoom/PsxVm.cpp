@@ -23,14 +23,18 @@
 #include "XboxAudioOut.h"
 #include "XboxDiag.h"
 #include "XboxLog.h"
+#include "XboxPaths.h"
     #include <hal/debug.h>
     #include <windows.h>
     #include <cstring>
     #include "Wess/wessapi.h"
     #include "Wess/wessarc.h"
     static void psxvmStep(const char* msg) noexcept {
-        debugPrint("[PSXVM] %s\n", msg);
-        HANDLE h = CreateFileA("E:\\Apps\\PsyDoomX\\bootlog.txt",
+        // Not once the game's picture is up - see 'XboxDiag::gbGameOwnsScreen'
+        if (!XboxDiag::gbGameOwnsScreen) {
+            debugPrint("[PSXVM] %s\n", msg);
+        }
+        HANDLE h = CreateFileA(XboxPaths::bootLogPath(),
             FILE_APPEND_DATA, FILE_SHARE_READ, nullptr,
             OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (h != INVALID_HANDLE_VALUE) {

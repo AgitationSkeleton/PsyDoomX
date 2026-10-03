@@ -136,6 +136,12 @@ void ST_RestartPlayerFace(const int32_t playerIdx) noexcept {
     gStatusBar.gibframe = 0;
     gStatusBar.gibframeTicsLeft = 0;
 
+    // Keycard flashes asked for in the last life: 'ST_InitEveryLevel' used to clear these for every player, and since it
+    // now only does that for player one, a respawning or newly started player two has them cleared here
+    for (int32_t cardIdx = 0; cardIdx < NUMCARDS; ++cardIdx) {
+        gStatusBar.tryopen[cardIdx] = false;
+    }
+
     gCurPlayerIndex = savedPlayer;
 }
 #endif
@@ -220,15 +226,26 @@ void ST_InitEveryLevel() noexcept {
         gStatusBar.alertMessageTicsLeft = 0;
     #endif
 
-    // Every player's face and card state, not just the console's own.
+    // The console's own player's face and card state - and any other player's only if it has never been set up.
     //
-    // These are per player now, and reached through 'gCurPlayerIndex' - which is zero here - so setting them once
-    // would leave player two with a null face sprite to draw.
+    // These are per player now, and reached through 'gCurPlayerIndex' - which is zero here - so setting them once would
+    // leave player two with a null face sprite to draw. That is what the second half of this is for.
+    //
+    // It used to reset every player's face, every time. But this does not only run at the start of a level: it runs
+    // whenever player one spawns, which in a multiplayer game includes every respawn. So player one coming back to life
+    // switched player two's face back on - and a player two who had been gibbed and not yet respawned showed the dead
+    // marine instead of an empty box. Player two respawning never ran this, which is why it only ever went one way.
+    //
+    // A player's face is reset as they themselves spawn, by 'G_DoReborn' through 'ST_RestartPlayerFace' - at the start
+    // of a level as well as on a respawn - so nothing here needs to touch another player's.
     {
         const int32_t savedPlayer = gCurPlayerIndex;
 
         for (int32_t i = 0; i < MAXPLAYERS; ++i) {
             gCurPlayerIndex = i;
+
+            if ((i != savedPlayer) && gpCurSBFaceSprite)
+                continue;
 
             gbDrawSBFace = true;
             gFaceTics = 0;

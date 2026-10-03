@@ -377,6 +377,15 @@ void I_UpdatePalette() noexcept {
     g3dViewPaletteClutId = gPaletteClutIds[paletteIdx];
 }
 
+#if defined(__XBOX__)
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Which big font character to draw for 'c'. See the note in the header.
+//------------------------------------------------------------------------------------------------------------------------------------------
+char I_BigFontChar(const char c) noexcept {
+    return (Game::gbIsPsxDoomForever && (c >= 'A') && (c <= 'Z')) ? (char)(c - 'A' + 'a') : c;
+}
+#endif
+
 //------------------------------------------------------------------------------------------------------------------------------------------
 // For the given string returns the 'x' coordinate to draw it in the center of the screen.
 // Assumes the big font is being used.
@@ -387,6 +396,10 @@ static int32_t I_GetStringXPosToCenter(const char* const str) noexcept {
     const char* pCurChar = str;
 
     for (char c = *pCurChar; c != 0; ++pCurChar, c = *pCurChar) {
+        #if defined(__XBOX__)
+            c = I_BigFontChar(c);   // Doom Forever: see the note on 'I_BigFontChar'
+        #endif
+
         // Figure out which font character to use and from that it's width
         int32_t charIdx = 0;
 
@@ -434,6 +447,10 @@ int32_t I_GetStringWidth(const char* const str) noexcept {
     const char* pCurChar = str;
 
     for (char c = *pCurChar; c != 0; ++pCurChar, c = *pCurChar) {
+        #if defined(__XBOX__)
+            c = I_BigFontChar(c);   // Doom Forever: see the note on 'I_BigFontChar'
+        #endif
+
         // Figure out which font character to use and from that it's width
         int32_t charIdx = 0;
 
@@ -512,6 +529,10 @@ void I_DrawString(const int32_t x, const int32_t y, const char* const str) noexc
     const char* pCurChar = str;
 
     for (char c = *pCurChar; c != 0; ++pCurChar, c = *pCurChar) {
+        #if defined(__XBOX__)
+            c = I_BigFontChar(c);   // Doom Forever: see the note on 'I_BigFontChar'
+        #endif
+
         // Figure out which font character to use, and y positioning
         int32_t curY = y;
         int32_t charIdx = 0;

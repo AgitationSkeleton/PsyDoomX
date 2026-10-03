@@ -39,6 +39,11 @@ BEGIN_NAMESPACE(Randomizer)
 
 bool gbEnabled = false;
 
+// Whether this level's starting weapons have been handed out. Respawns before that point are part of setting the level
+// up, and get theirs with everyone else's; respawns after it are a player coming back mid level, and get one of their own.
+// Cleared as each level is rolled, set once 'grantStartingWeapon' has run.
+static bool gbLevelWeaponsGranted = false;
+
 //------------------------------------------------------------------------------------------------------------------------------------------
 // A random number generator of this mode's own.
 //
@@ -826,6 +831,9 @@ static void logTally(
 // Roll the level
 //------------------------------------------------------------------------------------------------------------------------------------------
 void randomizeLevel() noexcept {
+    // A new level: nobody has their weapon for it yet, and the players about to be spawned are not respawns
+    gbLevelWeaponsGranted = false;
+
     if (!gbEnabled) {
         gSkipped.clear();
         return;
@@ -1042,15 +1050,12 @@ static constexpr StartingWeapon STARTING_WEAPONS[] = {
 // Five clips is what a box pickup is worth: fifty bullets, twenty shells, five rockets or a hundred cells
 static constexpr int32_t LARGE_AMMO_PACK_CLIPS = 5;
 
-static const char* gGrantedWeaponName = nullptr;
-
-void grantStartingWeapon() noexcept {
-    gGrantedWeaponName = nullptr;
-
-    if (!gbEnabled)
+// Give one player their weapon. Each player rolls their own, so two players in co-op need not start with the same thing.
+static void grantStartingWeaponTo(const int32_t playerIdx) noexcept {
+    if ((playerIdx < 0) || (playerIdx >= MAXPLAYERS) || (!gbPlayerInGame[playerIdx]))
         return;
 
-    player_t& player = gPlayers[0];
+    player_t& player = gPlayers[playerIdx];
 
     // Nothing to give a player who is not there. This runs during level setup, so the thing should exist by now, but
     // the check costs nothing and the alternative is a crash.
@@ -1066,16 +1071,36 @@ void grantStartingWeapon() noexcept {
         P_GiveAmmo(player, choice.ammo, LARGE_AMMO_PACK_CLIPS);
     }
 
-    gGrantedWeaponName = choice.name;
-
     // Said here rather than with the rest of the roll's report, because this happens after that is written
     #if defined(__XBOX__)
-        XBOX_LOGI(General, 
-            "Randomizer - Granted: %s%s",
+        XBOX_LOGI(General,
+            "Randomizer - Granted player %d: %s%s",
+            (int) playerIdx + 1,
             choice.name,
             (choice.bHasAmmo) ? " and a large ammo pack" : " (no ammo: it needs none)"
         );
     #endif
+}
+
+void grantStartingWeapon() noexcept {
+    if (!gbEnabled)
+        return;
+
+    // Everyone in the game, which in single player is the one player and in Coop Rando is both
+    for (int32_t playerIdx = 0; playerIdx < MAXPLAYERS; ++playerIdx) {
+        grantStartingWeaponTo(playerIdx);
+    }
+
+    gbLevelWeaponsGranted = true;
+}
+
+void grantRespawnWeapon(const int32_t playerIdx) noexcept {
+    // Single player never respawns mid level - dying restarts it, which runs 'grantStartingWeapon' again - so this is
+    // only ever a co-op player coming back into a level that is already rolled
+    if ((!gbEnabled) || (!gbLevelWeaponsGranted))
+        return;
+
+    grantStartingWeaponTo(playerIdx);
 }
 
 //------------------------------------------------------------------------------------------------------------------------------------------

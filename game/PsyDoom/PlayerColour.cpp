@@ -5,6 +5,7 @@
 #include "Game.h"
 #include "PlayerPrefs.h"
 #include "WadList.h"
+#include "XboxPaths.h"
 
 #include "Doom/doomdef.h"
 #include "Doom/Game/g_game.h"
@@ -38,13 +39,17 @@ static constexpr ColourDef kColours[COLOUR_COUNT] = {
 // Per edition because the Master Edition's marine is drawn differently: of the fifty one 'PLAY' lumps, only fourteen
 // match Doom's. Doom and Final Doom are byte for byte identical in all fifty one, but keeping a file each costs little
 // and means nothing has to know that.
-static constexpr const char* kWadPaths[] = {
-    "E:\\Apps\\PsyDoomX\\cache\\plrd.wad",
-    "E:\\Apps\\PsyDoomX\\cache\\plrf.wad",
-    "E:\\Apps\\PsyDoomX\\cache\\plrm.wad"
+//
+// Doom Forever has a file of its own too. It plays as Final Doom, but its marine is redrawn - none of its fifty one
+// 'PLAY' lumps match Final Doom's - so Final Doom's recoloured frames would put the wrong marine on screen.
+static constexpr const char* kWadNames[] = {
+    "cache\\plrd.wad",
+    "cache\\plrf.wad",
+    "cache\\plrm.wad",
+    "cache\\plrr.wad"
 };
 
-static constexpr int32_t NUM_EDITIONS = (int32_t) (sizeof(kWadPaths) / sizeof(kWadPaths[0]));
+static constexpr int32_t NUM_EDITIONS = (int32_t) (sizeof(kWadNames) / sizeof(kWadNames[0]));
 
 // The recoloured sprites, once they have been found among the loaded ones
 static const spritedef_t* gpColourSprites[COLOUR_COUNT] = {};
@@ -65,7 +70,12 @@ const char* spriteName(const Colour colour) noexcept {
 }
 
 const char* wadPathForEdition(const int32_t editionIdx) noexcept {
-    return ((editionIdx >= 0) && (editionIdx < NUM_EDITIONS)) ? kWadPaths[editionIdx] : "";
+    if ((editionIdx < 0) || (editionIdx >= NUM_EDITIONS))
+        return "";
+
+    // Beside the executable, wherever that is
+    static char paths[NUM_EDITIONS][260];
+    return XboxPaths::make(paths[editionIdx], sizeof(paths[editionIdx]), kWadNames[editionIdx]);
 }
 
 //------------------------------------------------------------------------------------------------------------------------------------------
@@ -74,7 +84,7 @@ const char* wadPathForEdition(const int32_t editionIdx) noexcept {
 static int32_t runningEditionIdx() noexcept {
     switch (Game::gGameType) {
         case GameType::FinalDoom:
-            return 1;
+            return (Game::gbIsPsxDoomForever) ? EDITION_FOREVER : 1;
 
         case GameType::GEC_ME_Beta3:
         case GameType::GEC_ME_Beta4:

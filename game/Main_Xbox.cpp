@@ -3,9 +3,12 @@
 #include "PsyDoom/Game.h"
 #include "PsyDoom/LauncherAssets.h"
 #include "PsyDoom/LauncherAudio.h"
+#include "PsyDoom/PlayerColour.h"
 #include "PsyDoom/SsgStyle.h"
 #include "PsyDoom/XboxDiag.h"
 #include "PsyDoom/XboxLog.h"
+#include "PsyDoom/XboxPads.h"
+#include "PsyDoom/XboxPaths.h"
 
 #include <cstdio>
 #include <cstring>
@@ -25,59 +28,66 @@
 #define MAX_PATH_LEN 260
 #define STATUS_LEN 200
 
+// The games the launcher can offer, in the order it lists them. New ones go on the end: the menu style setting and the
+// launch data both carry an edition by its number, so inserting one would change what an old setting meant.
 typedef enum GameEdition {
     EDITION_DOOM = 0,
     EDITION_FINAL_DOOM,
     EDITION_MASTER,
+    EDITION_FOREVER,
     EDITION_MAX
 } GameEdition;
 
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Where each game's disc is looked for.
+//
+// In a folder beside the executable, under the name the instructions give it - and failing that, any .cue sheet in that
+// folder at all, since a disc dumped by someone else will rarely be called what these instructions call it. Doom Forever
+// is the case in point: its cue sheet is 'Doom.cue', the same as Doom's, so only the folder can tell them apart.
+//
+// The fixed locations at the end are where the very first builds looked, still honoured so nothing set up for them breaks.
+//------------------------------------------------------------------------------------------------------------------------------------------
 typedef struct GameOption {
     const char* name;
-    const char* paths[4];  // Multiple search paths for this edition
+    const char* folders[3];         // Folders beside the executable, the documented one first
+    const char* cueNames[3];        // Cue sheet names to try in each folder before taking any .cue there
+    const char* legacyPaths[2];     // Absolute paths from before the launcher followed the executable around
     int found;
     char resolved_path[MAX_PATH_LEN];
 } GameOption;
 
 namespace {
 
-// Boot log for diagnostics
-static constexpr const char* kBootLogPaths[] = {
-    "E:\\Apps\\PsyDoomX\\bootlog.txt",
-    "bootlog.txt"
-};
-
 static GameOption g_editions[EDITION_MAX] = {
     {
         "Doom",
-        {
-            "E:\\Apps\\PsyDoomX\\Doom\\Doom.cue",
-            "E:\\Doom\\Doom.cue",
-            nullptr,
-            nullptr
-        },
+        { "Doom", nullptr, nullptr },
+        { "Doom.cue", nullptr, nullptr },
+        { "E:\\Doom\\Doom.cue", nullptr },
         0,
         ""
     },
     {
         "Final Doom",
-        {
-            "E:\\Apps\\PsyDoomX\\FinalDoom\\FinalDoom.cue",
-            "E:\\FinalDoom\\FinalDoom.cue",
-            nullptr,
-            nullptr
-        },
+        { "FinalDoom", "Final Doom", nullptr },
+        { "FinalDoom.cue", nullptr, nullptr },
+        { "E:\\FinalDoom\\FinalDoom.cue", nullptr },
         0,
         ""
     },
     {
         "Master Edition",
-        {
-            "E:\\Apps\\PsyDoomX\\MasterEdition\\PSXDOOM_BETA_4.cue",
-            nullptr,
-            nullptr,
-            nullptr
-        },
+        { "MasterEdition", "Master Edition", nullptr },
+        { "PSXDOOM_BETA_4.cue", nullptr, nullptr },
+        { nullptr, nullptr },
+        0,
+        ""
+    },
+    {
+        "Doom Forever",
+        { "DoomForever", "Doom Forever", nullptr },
+        { "Doom.cue", "DoomForever.cue", nullptr },
+        { nullptr, nullptr },
         0,
         ""
     }
@@ -110,7 +120,11 @@ static bool pathExists(const char* path) {
 static bool gbBootLogStarted = false;
 
 static void appendBootLog(const char* const msg) {
-    for (const char* const path : kBootLogPaths) {
+    // Beside the executable, wherever that is. Before the drives are mounted this cannot be written at all, which is
+    // why the first line of a session is the one after mounting rather than the very first.
+    {
+        const char* const path = XboxPaths::bootLogPath();
+
         HANDLE const h = CreateFileA(
             path,
             gbBootLogStarted ? FILE_APPEND_DATA : GENERIC_WRITE,
@@ -122,7 +136,7 @@ static void appendBootLog(const char* const msg) {
         );
 
         if (h == INVALID_HANDLE_VALUE)
-            continue;
+            return;
 
         // Seek to the end before writing.
         //
@@ -217,7 +231,10 @@ static LaunchPayload gLaunchPayload;
 //
 // Kept beside the executable rather than in the game's config, because the launcher is what offers it and the launcher
 // runs before any game is chosen.
-static constexpr const char* kSettingsPath = "E:\\Apps\\PsyDoomX\\launcher.ini";
+static const char* settingsPath() noexcept {
+    static char path[MAX_PATH_LEN];
+    return XboxPaths::make(path, sizeof(path), "launcher.ini");
+}
 
 static int32_t gOverlayMode = OVERLAY_OFF;
 static int32_t gLevelNameMode = LEVELNAMES_VANILLA;
@@ -241,7 +258,7 @@ static void loadSettings() noexcept {
     gOverlayMode = OVERLAY_OFF;
     gLevelNameMode = LEVELNAMES_VANILLA;
 
-    HANDLE const h = CreateFileA(kSettingsPath, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    HANDLE const h = CreateFileA(settingsPath(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
 
     if (h == INVALID_HANDLE_VALUE)
         return;
@@ -285,7 +302,7 @@ static void loadSettings() noexcept {
 }
 
 static void saveSettings() noexcept {
-    HANDLE const h = CreateFileA(kSettingsPath, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    HANDLE const h = CreateFileA(settingsPath(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
 
     if (h == INVALID_HANDLE_VALUE)
         return;
@@ -348,18 +365,14 @@ static constexpr int MENU_ITEM_STYLE = EDITION_MAX + 2;
 static constexpr int MENU_ITEM_EXIT = EDITION_MAX + 3;
 static constexpr int MENU_ITEM_COUNT = EDITION_MAX + 4;
 
-// Where this XBE lives, most likely first.
-//
-// The install path leads because 'D:' is the DVD drive on this console, not this title's own directory - that mapping
-// only holds for a title launched from disc. Asking for 'D:\default.xbe' first sent the console to a black screen:
-// nothing was there, and by then it was too late to change course.
-static constexpr const char* kSelfXbePaths[] = {
-    "E:\\Apps\\PsyDoomX\\default.xbe",
-    "D:\\default.xbe"
-};
-
 //------------------------------------------------------------------------------------------------------------------------------------------
 // Restart this XBE, telling the new copy what to do. Does not return unless the relaunch could not be done at all.
+//
+// This copy, by the path the kernel started it from. It used to be 'E:\Apps\PsyDoomX\default.xbe' whatever was actually
+// running, so a copy anywhere else drew its menu and then handed the game to a different copy - or to nothing at all,
+// which is a black screen. That is why installing to 'E:\Games' or 'F:\Homebrew' only ever worked when a second copy
+// happened to be sitting in 'E:\Apps'. 'D:' was tried once and is no help: it is the DVD drive here, not the title's
+// folder.
 //------------------------------------------------------------------------------------------------------------------------------------------
 static void relaunchSelf(const LaunchAction action, const int edition) noexcept {
     std::memset(&gLaunchPayload, 0, sizeof(gLaunchPayload));
@@ -369,26 +382,33 @@ static void relaunchSelf(const LaunchAction action, const int edition) noexcept 
     gLaunchPayload.levelNameMode = gLevelNameMode;
     gLaunchPayload.edition = edition;
 
-    for (const char* const pXbePath : kSelfXbePaths) {
-        // Check the file is really there before asking the firmware for it.
-        //
-        // This matters more than it looks. 'XLaunchXBEEx' only turns back if it cannot make sense of the path it was
-        // given; a path that converts cleanly but points at nothing still reboots the console, and lands it on a black
-        // screen with no way back. There is no second chance after that call, so the checking has to happen here.
-        if (!pathExists(pXbePath)) {
-            appendBootLog("LAUNCH: no XBE at candidate path, trying the next");
-            continue;
-        }
+    // Make sure there is a path to launch at all.
+    //
+    // This matters more than it looks. 'XLaunchXBEEx' only turns back if it cannot make sense of the path it was given;
+    // a path that converts cleanly but points at nothing still reboots the console, and lands it on a black screen with
+    // no way back. The kernel's record of the running image cannot point at nothing - it is the file this code is being
+    // run from - so it is only an empty one that is refused. The check through a drive letter is for the log: when that
+    // fails, the launch goes ahead anyway and the log says the location was never confirmed.
+    const char* const pNtPath = XboxPaths::xbeNtPath();
 
-        appendBootLog((action == LAUNCH_ACTION_GAME) ? "LAUNCH: restarting into game" : "LAUNCH: restarting into menu");
-        appendBootLog(pXbePath);
-        XLaunchXBEEx(pXbePath, &gLaunchPayload);
-
-        // Only reached if the firmware refused the path outright
-        appendBootLog("LAUNCH: the firmware would not take that path");
+    if (pNtPath[0] == '\0') {
+        appendBootLog("LAUNCH: could not restart - the kernel did not say where this XBE is");
+        return;
     }
 
-    appendBootLog("LAUNCH: could not restart - no usable path to this XBE");
+    if (!pathExists(XboxPaths::xbeDosPath())) {
+        appendBootLog("LAUNCH: this XBE could not be confirmed through a drive letter - relaunching by the kernel's path regardless");
+    }
+
+    appendBootLog((action == LAUNCH_ACTION_GAME) ? "LAUNCH: restarting into game" : "LAUNCH: restarting into menu");
+    appendBootLog(pNtPath);
+
+    // Quiet the USB controller first. See 'XboxPads::shutdownForRelaunch'.
+    XboxPads::shutdownForRelaunch();
+    XLaunchXBEEx(pNtPath, &gLaunchPayload);
+
+    // Only reached if the firmware refused the path outright
+    appendBootLog("LAUNCH: the firmware would not take that path");
 }
 
 //------------------------------------------------------------------------------------------------------------------------------------------
@@ -399,6 +419,7 @@ static void relaunchSelf(const LaunchAction action, const int edition) noexcept 
 //------------------------------------------------------------------------------------------------------------------------------------------
 static void exitToDashboard() noexcept {
     appendBootLog("MENU: returning to the dashboard");
+    XboxPads::shutdownForRelaunch();
     XLaunchXBE(nullptr);
     appendBootLog("MENU: the dashboard would not launch");
 }
@@ -453,51 +474,172 @@ static bool readLaunchRequest(LaunchAction& actionOut, int& editionOut) noexcept
     return true;
 }
 
-static SDL_GameController* openFirstController() {
-    for (int i = 0; i < SDL_NumJoysticks(); ++i) {
-        if (SDL_IsGameController(i)) {
-            SDL_GameController* pad = SDL_GameControllerOpen(i);
-            if (pad) {
-                return pad;
-            }
+//------------------------------------------------------------------------------------------------------------------------------------------
+// The pads the menu listens to: every one that is plugged in.
+//
+// It used to open the first pad it found and listen to nothing else. With more than one plugged in, the menu answered
+// to whichever SDL happened to list first - not necessarily the one in the player's hands - and a pad that finished
+// enumerating after another was never heard at all. Third party pads are often the slower ones to enumerate.
+//------------------------------------------------------------------------------------------------------------------------------------------
+static constexpr int MAX_MENU_PADS = 4;
+static SDL_GameController* gMenuPads[MAX_MENU_PADS] = {};
+
+static void closeDetachedMenuPads() noexcept {
+    for (SDL_GameController*& pPad : gMenuPads) {
+        if (pPad && (!SDL_GameControllerGetAttached(pPad))) {
+            XBOX_LOGI(Input, "menu: a pad was unplugged");
+            SDL_GameControllerClose(pPad);
+            pPad = nullptr;
         }
     }
-    return nullptr;
 }
 
-static int buttonPressedEdge(SDL_GameController* pad, SDL_GameControllerButton button, Uint8* previous) {
-    Uint8 current = 0;
-    int rising;
+static void openMenuPads() noexcept {
+    const int numJoysticks = SDL_NumJoysticks();
 
-    if (pad) {
-        current = (Uint8)SDL_GameControllerGetButton(pad, button);
+    for (int i = 0; i < numJoysticks; ++i) {
+        if (!SDL_IsGameController(i))
+            continue;
+
+        const SDL_JoystickID id = SDL_JoystickGetDeviceInstanceID(i);
+        bool bAlreadyOpen = false;
+        SDL_GameController** ppFreeSlot = nullptr;
+
+        for (SDL_GameController*& pPad : gMenuPads) {
+            if (pPad && (SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(pPad)) == id)) {
+                bAlreadyOpen = true;
+            }
+
+            if ((!pPad) && (!ppFreeSlot)) {
+                ppFreeSlot = &pPad;
+            }
+        }
+
+        if (bAlreadyOpen || (!ppFreeSlot))
+            continue;
+
+        *ppFreeSlot = SDL_GameControllerOpen(i);
+
+        XBOX_LOGI(
+            Input, "menu: pad %d opened (instance %d, '%s') - %s",
+            i, (int) id, SDL_GameControllerNameForIndex(i), (*ppFreeSlot) ? "ok" : SDL_GetError()
+        );
+    }
+}
+
+// Is this button held on any pad?
+static bool menuButtonHeld(const SDL_GameControllerButton button) noexcept {
+    for (SDL_GameController* const pPad : gMenuPads) {
+        if (pPad && SDL_GameControllerGetButton(pPad, button))
+            return true;
     }
 
-    rising = (current != 0) && (*previous == 0);
+    return false;
+}
+
+static int buttonPressedEdge(SDL_GameControllerButton button, Uint8* previous) {
+    const Uint8 current = (menuButtonHeld(button)) ? 1 : 0;
+    const int rising = (current != 0) && (*previous == 0);
     *previous = current;
     return rising;
 }
 
+// The first .cue sheet in a folder, whatever it is called
+static bool findAnyCueInFolder(const char* const folderPath, char* const out, const size_t outSize) noexcept {
+    char pattern[MAX_PATH_LEN];
+    std::snprintf(pattern, sizeof(pattern), "%s\\*.cue", folderPath);
+
+    WIN32_FIND_DATAA findData = {};
+    HANDLE const h = FindFirstFileA(pattern, &findData);
+
+    if (h == INVALID_HANDLE_VALUE)
+        return false;
+
+    bool bFound = false;
+
+    do {
+        if ((findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+            std::snprintf(out, outSize, "%s\\%s", folderPath, findData.cFileName);
+            bFound = true;
+            break;
+        }
+    } while (FindNextFileA(h, &findData));
+
+    FindClose(h);
+    return bFound;
+}
+
 static void scanEditions() {
     for (int i = 0; i < EDITION_MAX; ++i) {
-        g_editions[i].found = 0;
-        g_editions[i].resolved_path[0] = '\0';
+        GameOption& edition = g_editions[i];
+        edition.found = 0;
+        edition.resolved_path[0] = '\0';
 
-        for (int j = 0; g_editions[i].paths[j] != nullptr; ++j) {
-            if (pathExists(g_editions[i].paths[j])) {
-                g_editions[i].found = 1;
-                std::strcpy(g_editions[i].resolved_path, g_editions[i].paths[j]);
-                break;
+        // Beside the executable: the documented name first, then any cue sheet the folder has
+        for (int f = 0; (f < 3) && edition.folders[f] && (!edition.found); ++f) {
+            char folderPath[MAX_PATH_LEN];
+            XboxPaths::make(folderPath, sizeof(folderPath), edition.folders[f]);
+
+            for (int c = 0; (c < 3) && edition.cueNames[c] && (!edition.found); ++c) {
+                char cuePath[MAX_PATH_LEN];
+                std::snprintf(cuePath, sizeof(cuePath), "%s\\%s", folderPath, edition.cueNames[c]);
+
+                if (pathExists(cuePath)) {
+                    edition.found = 1;
+                    std::snprintf(edition.resolved_path, sizeof(edition.resolved_path), "%s", cuePath);
+                }
+            }
+
+            if ((!edition.found) && findAnyCueInFolder(folderPath, edition.resolved_path, sizeof(edition.resolved_path))) {
+                edition.found = 1;
             }
         }
+
+        // Where the first builds looked
+        for (int l = 0; (l < 2) && edition.legacyPaths[l] && (!edition.found); ++l) {
+            if (pathExists(edition.legacyPaths[l])) {
+                edition.found = 1;
+                std::snprintf(edition.resolved_path, sizeof(edition.resolved_path), "%s", edition.legacyPaths[l]);
+            }
+        }
+
+        if (!edition.found) {
+            edition.resolved_path[0] = '\0';
+        }
+
+        XBOX_LOGI(General, "editions: %s - %s", edition.name, (edition.found) ? edition.resolved_path : "not found");
     }
 }
 
-static const char* getFileName(const char* path) {
-    if (!path)
-        return "";
-    const char* slash = std::strrchr(path, '\\');
-    return slash ? (slash + 1) : path;
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Writing the plain menu.
+//
+// nxdk's text output draws 9 pixels a character with a 25 pixel margin either side, so a line at 640 wide holds 62
+// characters before it wraps on its own - and a wrapped line pushes everything below it down a row.
+//------------------------------------------------------------------------------------------------------------------------------------------
+static constexpr int PLAIN_COLS = 62;
+
+// One line of the plain menu, padded with spaces to the full width so it covers whatever the last repaint left there
+static void plainLine(const char* const text) noexcept {
+    char line[PLAIN_COLS + 2];
+    const size_t len = std::min(std::strlen((text) ? text : ""), (size_t) PLAIN_COLS);
+
+    std::memcpy(line, text, len);
+    std::memset(line + len, ' ', (size_t) PLAIN_COLS - len);
+    line[PLAIN_COLS] = '\n';
+    line[PLAIN_COLS + 1] = '\0';
+    debugPrint("%s", line);
+}
+
+// The end of a path, if the whole of it will not fit: the folder and file name are the useful part
+static void fitTail(const char* const text, char* const out, const size_t outSize, const int maxChars) noexcept {
+    const int len = (int) std::strlen(text);
+
+    if (len <= maxChars) {
+        std::snprintf(out, outSize, "%s", text);
+    } else {
+        std::snprintf(out, outSize, "...%s", text + (len - (maxChars - 3)));
+    }
 }
 
 [[noreturn]] static void showErrorAndHalt(const char* msg) {
@@ -529,7 +671,6 @@ static void runBootstrapMenu() {
     FatalErrors::gFatalErrorHandler = launcherFatalErrorHandler;
     XVideoSetMode(640, 480, 32, REFRESH_DEFAULT);
 
-    SDL_GameController* pad = nullptr;
     SDL_Event event;
     int sdl_ready = 0;
     int selected = EDITION_DOOM;
@@ -538,12 +679,15 @@ static void runBootstrapMenu() {
     // The cursor's two frame animation
     int cursorFrame = 0;
     Uint32 lastCursorTick = SDL_GetTicks();
+    uint32_t plainRefreshTicks = 0;     // Blink ticks, counted so the plain list can refresh on every fourth
+    bool bPlainOnScreen = false;        // Whether the plain list is what the screen shows, so it can be written over in place
     Uint8 prev_a = 0;
     Uint8 prev_start = 0;
     Uint8 prev_back = 0;
     char status[STATUS_LEN] = "Select game edition and press START";
 
     appendBootLog("MENU: Initializing menu system");
+    XboxPads::beginSession("launcher");
 
     // Initialize SDL for controller input
     if (SDL_Init(SDL_INIT_GAMECONTROLLER) != 0) {
@@ -552,7 +696,8 @@ static void runBootstrapMenu() {
         Sleep(1500);
     } else {
         sdl_ready = 1;
-        pad = openFirstController();
+        XboxPads::service();
+        openMenuPads();
     }
 
     // Scan for available editions
@@ -573,22 +718,34 @@ static void runBootstrapMenu() {
     static const LauncherAssets::MenuArt kMenuArt[EDITION_MAX] = {
         LauncherAssets::MENU_ART_DOOM,
         LauncherAssets::MENU_ART_FINAL_DOOM,
-        LauncherAssets::MENU_ART_MASTER
+        LauncherAssets::MENU_ART_MASTER,
+        LauncherAssets::MENU_ART_FOREVER
     };
 
     // Which edition each disc is, in the terms the super shotgun setting uses.
     //
-    // This is the only place all three discs are readable at once - a game only ever sees the one it was started with -
-    // so it is where the sprites one edition might borrow from another have to be taken.
+    // This is the only place all the discs are readable at once - a game only ever sees the one it was started with -
+    // so it is where the sprites one edition might borrow from another have to be taken. Doom Forever's super shotgun is
+    // Final Doom's to the pixel, so it supplies that style too, which matters on a console that has Forever and not Final
+    // Doom. Probed after Final Doom, so where both are present it writes the same file over again.
     static const int32_t kSsgStyles[EDITION_MAX] = {
         SsgStyle::STYLE_DOOM,
         SsgStyle::STYLE_FINAL,
-        SsgStyle::STYLE_MASTER
+        SsgStyle::STYLE_MASTER,
+        SsgStyle::STYLE_FINAL
+    };
+
+    // And which recoloured marine file each writes. Doom Forever's marine is redrawn, so it has one of its own.
+    static const int32_t kPlayerColourEditions[EDITION_MAX] = {
+        PlayerColour::EDITION_DOOM,
+        PlayerColour::EDITION_FINAL,
+        PlayerColour::EDITION_MASTER,
+        PlayerColour::EDITION_FOREVER
     };
 
     for (int i = 0; i < EDITION_MAX; ++i) {
         if (g_editions[i].found) {
-            LauncherAssets::probeDisc(g_editions[i].resolved_path, kMenuArt[i], kSsgStyles[i]);
+            LauncherAssets::probeDisc(g_editions[i].resolved_path, kMenuArt[i], kSsgStyles[i], kPlayerColourEditions[i]);
         }
     }
 
@@ -600,7 +757,7 @@ static void runBootstrapMenu() {
     // 'gMenuStyle' is an edition index, or SIMPLE for the plain text menu. An edition that is not present cannot be
     // worn, so the setting falls back rather than leaving the menu blank.
     if ((gMenuStyle >= 0) && (gMenuStyle < EDITION_MAX) && g_editions[gMenuStyle].found) {
-        LauncherAssets::useStyle(g_editions[gMenuStyle].resolved_path);
+        LauncherAssets::useStyle(g_editions[gMenuStyle].resolved_path, (gMenuStyle == EDITION_FOREVER));
     }
 
     // Sound is started after the menu is on screen rather than before it.
@@ -680,7 +837,7 @@ static void runBootstrapMenu() {
     DirState dirUp = {}, dirDown = {}, dirLeft = {}, dirRight = {};
 
     const auto dirPressed = [&](const SDL_GameControllerButton button, DirState& state) noexcept -> bool {
-        const Uint8 bNowHeld = (pad) ? (Uint8) SDL_GameControllerGetButton(pad, button) : (Uint8) 0;
+        const Uint8 bNowHeld = (menuButtonHeld(button)) ? (Uint8) 1 : (Uint8) 0;
         const Uint32 now = SDL_GetTicks();
         bool bFire = false;
 
@@ -714,14 +871,26 @@ static void runBootstrapMenu() {
 
         if (sdl_ready) {
             while (SDL_PollEvent(&event)) {
-                if (event.type == SDL_CONTROLLERDEVICEADDED && !pad) {
-                    pad = SDL_GameControllerOpen(event.cdevice.which);
-                } else if (event.type == SDL_CONTROLLERDEVICEREMOVED && pad) {
-                    SDL_GameController* removed = SDL_GameControllerFromInstanceID(event.cdevice.which);
-                    if (removed == pad) {
-                        SDL_GameControllerClose(pad);
-                        pad = nullptr;
-                    }
+                if (event.type == SDL_CONTROLLERDEVICEADDED) {
+                    openMenuPads();
+                } else if (event.type == SDL_CONTROLLERDEVICEREMOVED) {
+                    closeDetachedMenuPads();
+                }
+            }
+
+            // Restart any pad read that an error stopped, and report what each pad is doing. See 'XboxPads.h'.
+            XboxPads::service();
+
+            // And look again now and then, rather than relying on an event to say a pad arrived or left. A pad that
+            // went unnoticed would leave the menu deaf with nothing on screen to say why.
+            {
+                static Uint32 sLastPadCheckMs = 0;
+                const Uint32 nowMs = SDL_GetTicks();
+
+                if ((nowMs - sLastPadCheckMs) >= 1000u) {
+                    sLastPadCheckMs = nowMs;
+                    closeDetachedMenuPads();
+                    openMenuPads();
                 }
             }
         }
@@ -736,9 +905,12 @@ static void runBootstrapMenu() {
 
                 // Only the cursor changed, so only the cursor is repainted. This used to repaint everything, four
                 // times a second, which is where most of the flicker came from.
+                //
+                // The plain list has no cursor to animate, so a blink is no reason to repaint it. It is refreshed once
+                // a second instead, which keeps its pad counters current.
                 if (isStyled()) {
                     cursorDirty = true;
-                } else {
+                } else if ((++plainRefreshTicks & 3u) == 0) {
                     needs_redraw = 1;
                 }
             }
@@ -815,7 +987,7 @@ static void runBootstrapMenu() {
 
                 // Live, as asked: the look changes as the setting does
                 if ((gMenuStyle >= 0) && g_editions[gMenuStyle].found) {
-                    LauncherAssets::useStyle(g_editions[gMenuStyle].resolved_path);
+                    LauncherAssets::useStyle(g_editions[gMenuStyle].resolved_path, (gMenuStyle == EDITION_FOREVER));
                 } else {
                     LauncherAssets::useStyle("");
                 }
@@ -839,8 +1011,8 @@ static void runBootstrapMenu() {
         // scheme is unchanged.
         // Both are read every pass rather than short circuited, or the one that is not reached keeps a stale 'was held'
         // state and fires an edge of its own on the next pass.
-        const bool bStartPressed = buttonPressedEdge(pad, SDL_CONTROLLER_BUTTON_START, &prev_start);
-        const bool bOkPressed = buttonPressedEdge(pad, SDL_CONTROLLER_BUTTON_A, &prev_a);
+        const bool bStartPressed = buttonPressedEdge(SDL_CONTROLLER_BUTTON_START, &prev_start);
+        const bool bOkPressed = buttonPressedEdge(SDL_CONTROLLER_BUTTON_A, &prev_a);
         const bool bConfirmPressed = (bStartPressed || (bOkPressed && isStyled()));
 
         if (bConfirmPressed) {
@@ -882,7 +1054,7 @@ static void runBootstrapMenu() {
         }
 
         // BACK to hand the console back to the dashboard
-        if (buttonPressedEdge(pad, SDL_CONTROLLER_BUTTON_BACK, &prev_back)) {
+        if (buttonPressedEdge(SDL_CONTROLLER_BUTTON_BACK, &prev_back)) {
             std::strcpy(status, "Returning to the dashboard...");
             confirmSound();
             LauncherAudio::shutdown();
@@ -1006,74 +1178,114 @@ static void runBootstrapMenu() {
             cursorDirty = false;
             dirtyRow = -1;
             framesDrawn++;
+            bPlainOnScreen = false;     // The plain list has been painted over, so it starts from a clear screen next time
             continue;   // The styled menu draws everything itself; the text list below is the fallback
         }
 
-        debugClearScreen();
-        debugPrint("=[ PsyDoomX Bootstrap | %s ]=\n\n", BUILD_ID);
-
-        debugPrint("Select Game Edition:\n\n");
-
-        for (int i = 0; i < EDITION_MAX; ++i) {
-            const char* marker = (i == selected) ? ">" : " ";
-            const char* status_str = g_editions[i].found ? "[OK]" : "[--]";
-
-            debugPrint("[%c] %s   %s\n", *marker, g_editions[i].name, status_str);
-
-            if (i == selected && g_editions[i].found) {
-                debugPrint("    Path: %s\n", getFileName(g_editions[i].resolved_path));
-            }
-        }
-
-        debugPrint(
-            "[%c] FPS Counter: %-8s%s\n",
-            (selected == MENU_ITEM_FPS) ? '>' : ' ',
-            kOverlayModeNames[gOverlayMode],
-            (selected == MENU_ITEM_FPS) ? "  (LEFT/RIGHT changes)" : ""
-        );
-
-        debugPrint(
-            "[%c] Level Names: %-14s%s\n",
-            (selected == MENU_ITEM_LEVELNAMES) ? '>' : ' ',
-            kLevelNameModeNames[gLevelNameMode],
-            (selected == MENU_ITEM_LEVELNAMES) ? "  (LEFT/RIGHT changes)" : ""
-        );
-
-        // The style row, which this list did not show.
+        //--------------------------------------------------------------------------------------------------------------
+        // The plain list.
         //
-        // It was navigable and changeable here but never printed, so on the plain menu the cursor could sit on a row
-        // that was not there and LEFT and RIGHT would appear to do nothing - and the only way back to a styled menu is
-        // through this row, which made SIMPLE a one way trip.
-        debugPrint(
-            "[%c] Menu Style:  %-14s%s\n",
-            (selected == MENU_ITEM_STYLE) ? '>' : ' ',
-            menuStyleName(gMenuStyle),
-            (selected == MENU_ITEM_STYLE) ? "  (LEFT/RIGHT changes)" : ""
-        );
-
-        debugPrint("[%c] Exit to Dashboard\n", (selected == MENU_ITEM_EXIT) ? '>' : ' ');
-
-        debugPrint("\n");
-        debugPrint("Diagnostics:\n");
-
-        int doom_found = 0, final_found = 0, master_found = 0;
-        for (int i = 0; i < EDITION_MAX; ++i) {
-            if (g_editions[i].found) {
-                if (i == EDITION_DOOM) doom_found = 1;
-                else if (i == EDITION_FINAL_DOOM) final_found = 1;
-                else if (i == EDITION_MASTER) master_found = 1;
-            }
+        // A fixed set of lines, each padded out to the full width, written over the top of the last repaint rather than
+        // after clearing the screen. Two things went wrong with it before:
+        //
+        //  - It was cleared and rewritten every time it changed, and a cursor blink it does not even draw counted as a
+        //    change, so it was wiped four times a second. With one framebuffer and no back buffer, the wipe is on
+        //    screen until the text goes back - which is the flicker.
+        //  - nxdk's text output only has room for 24 lines at this font size, and on reaching the bottom it clears the
+        //    whole screen and carries on from the top. The list was 24 lines exactly; adding Doom Forever, the folder
+        //    and the pads took it past that, so every repaint wiped itself half way through and left only its tail.
+        //
+        // The font draws its background as well as its letters, so a padded line covers whatever was there before and
+        // no clear is needed. The screen is only cleared when the list first appears over something else.
+        //--------------------------------------------------------------------------------------------------------------
+        if (!bPlainOnScreen) {
+            debugClearScreen();
+            bPlainOnScreen = true;
         }
 
-        debugPrint("  Doom Available: %s\n", doom_found ? "YES" : "NO");
-        debugPrint("  Final Doom Available: %s\n", final_found ? "YES" : "NO");
-        debugPrint("  Master Edition Available: %s\n", master_found ? "YES" : "NO");
+        debugResetCursor();
 
-        debugPrint("\nControls:\n");
-        debugPrint("  UP/DOWN = Move selection\n");
-        debugPrint("  START = Confirm selection\n");
-        debugPrint("  BACK  = Exit to dashboard (shortcut)\n\n");
-        debugPrint("Status: %s\n", status);
+        {
+            char line[128];
+
+            std::snprintf(line, sizeof(line), "=[ PsyDoomX | %s ]=", BUILD_ID);
+            plainLine(line);
+            plainLine("");
+
+            for (int i = 0; i < EDITION_MAX; ++i) {
+                std::snprintf(
+                    line, sizeof(line), "[%c] %-18s %s",
+                    (i == selected) ? '>' : ' ', g_editions[i].name, (g_editions[i].found) ? "[OK]" : "[--]"
+                );
+
+                plainLine(line);
+            }
+
+            std::snprintf(line, sizeof(line), "[%c] %-18s %s", (selected == MENU_ITEM_FPS) ? '>' : ' ', "FPS Counter", kOverlayModeNames[gOverlayMode]);
+            plainLine(line);
+            std::snprintf(line, sizeof(line), "[%c] %-18s %s", (selected == MENU_ITEM_LEVELNAMES) ? '>' : ' ', "Level Names", kLevelNameModeNames[gLevelNameMode]);
+            plainLine(line);
+
+            // The style row. It has to be here: it is the only way back from this list to a styled menu.
+            std::snprintf(line, sizeof(line), "[%c] %-18s %s", (selected == MENU_ITEM_STYLE) ? '>' : ' ', "Menu Style", menuStyleName(gMenuStyle));
+            plainLine(line);
+            std::snprintf(line, sizeof(line), "[%c] Exit to Dashboard", (selected == MENU_ITEM_EXIT) ? '>' : ' ');
+            plainLine(line);
+            plainLine("");
+
+            // The highlighted game's disc, and where this copy is running from - which is where everything is looked for
+            {
+                char fitted[PLAIN_COLS + 1];
+
+                if ((selected >= 0) && (selected < EDITION_MAX)) {
+                    fitTail((g_editions[selected].found) ? g_editions[selected].resolved_path : "not found", fitted, sizeof(fitted), PLAIN_COLS - 8);
+                } else {
+                    std::snprintf(fitted, sizeof(fitted), "-");
+                }
+
+                std::snprintf(line, sizeof(line), "Disc:   %s", fitted);
+                plainLine(line);
+
+                fitTail(XboxPaths::dir(), fitted, sizeof(fitted), PLAIN_COLS - 8);
+                std::snprintf(line, sizeof(line), "Folder: %s", fitted);
+                plainLine(line);
+            }
+
+            plainLine("");
+
+            // The pads, with how many reads have come in and how many errors were recovered from, so a pad that
+            // misbehaves can be looked at on the television without a machine listening on the relay. Always four
+            // lines, so the rows below do not move as pads come and go.
+            plainLine("Pads (port, vendor:product, reads, errors, restarts):");
+            {
+                char padText[256];
+                const int32_t numPads = XboxPads::describe(padText, sizeof(padText));
+                const char* pPadLine = padText;
+
+                for (int32_t i = 0; i < 4; ++i) {
+                    if ((numPads == 0) && (i == 0)) {
+                        plainLine("  none seen yet");
+                        continue;
+                    }
+
+                    if ((!pPadLine) || (*pPadLine == '\0')) {
+                        plainLine("");
+                        continue;
+                    }
+
+                    const char* const pEnd = std::strchr(pPadLine, '\n');
+                    const int lineLen = (pEnd) ? (int)(pEnd - pPadLine) : (int) std::strlen(pPadLine);
+
+                    std::snprintf(line, sizeof(line), "  %.*s", lineLen, pPadLine);
+                    plainLine(line);
+                    pPadLine = (pEnd) ? (pEnd + 1) : nullptr;
+                }
+            }
+
+            plainLine("");
+            plainLine("UP/DOWN move  LEFT/RIGHT change  START confirm  BACK quit");
+            plainLine(status);
+        }
 
         // Cleared here as well as on the styled path. The plain list repaints all of itself whatever changed, and a
         // partial-repaint flag left set behind it would make this loop redraw without pause.
@@ -1088,14 +1300,18 @@ static void runBootstrapMenu() {
 } // namespace
 
 int main(const int argc, const char* const* const argv) {
-    appendBootLog("BOOT: entered Main_Xbox");
-
     try {
         // Mount Xbox drives
-        appendBootLog("BOOT: mounting drives");
         mountCommonDrives();
 
-        // Start the diagnostic relay as early as the drives allow, since it reads its server address from E:.
+        // Then work out where this copy is, which every file path from here on is built from - the boot log included,
+        // which is why nothing is written to it before this point.
+        XboxPaths::init();
+        appendBootLog("BOOT: entered Main_Xbox, drives mounted");
+        appendBootLog(XboxPaths::describe());
+
+        // Start the diagnostic relay as early as the drives allow, since it reads its server address from beside the
+        // executable.
         //
         // This does not wait for the network: bringing that up and connecting happen on a background thread, so a
         // console sat waiting for DHCP does not delay the game by a millisecond. If nothing is listening the relay is
@@ -1108,6 +1324,7 @@ int main(const int argc, const char* const* const argv) {
         #endif
 
         XBOX_LOGI(General, "boot: drives mounted, relay started");
+        XBOX_LOGI(General, "boot: %s", XboxPaths::describe());
 
         // Initialize video
         appendBootLog("BOOT: initializing video mode");
@@ -1153,7 +1370,8 @@ int main(const int argc, const char* const* const argv) {
                 scanEditions();
 
                 if (g_editions[launchEdition].found) {
-                    XBOX_LOGI(General, "boot: starting '%s'", g_editions[launchEdition].name);
+                    XBOX_LOGI(General, "boot: starting '%s' from '%s'", g_editions[launchEdition].name, g_editions[launchEdition].resolved_path);
+                    XboxPads::beginSession(g_editions[launchEdition].name);
 
                     std::vector<const char*> gameArgv;
                     gameArgv.push_back("PsyDoomX");

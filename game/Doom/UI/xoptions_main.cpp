@@ -28,6 +28,7 @@
 #include "PsyDoom/Vulkan/VRenderer.h"
 #endif
 
+#include <algorithm>
 #include <cstdio>
 
 // The available menu items
@@ -36,11 +37,6 @@ enum MenuItem : int32_t {
     menu_always_run,
     menu_stat_display,
 #if !defined(__XBOX__)
-    // Not offered on Xbox.
-    //
-    // With the cap on, 'I_DrawPresent' spins until enough vblanks have passed, which pins the frame to 33.3ms and
-    // makes every optimisation below that threshold worth nothing. There is no frame rate here to protect - the game
-    // does not reach the cap - so the setting can only make things worse, and offering it invites exactly that.
     menu_uncapped_framerate,
 #endif
 #if defined(__XBOX__)
@@ -52,6 +48,18 @@ enum MenuItem : int32_t {
 
     // Which edition's super shotgun to carry
     menu_ssg_style,
+
+    // Uncapped, or locked to the television's refresh.
+    //
+    // This was taken off the Xbox menu when the game ran at around 25 frames a second: a cap of 30 could only make that
+    // worse, and the cap then was a spin on a clock that pinned every frame to 33ms. Neither holds now. Single player
+    // runs at a median of about 36, swinging between 20 and 48, and it was reported as uneven - which it is. The lock is
+    // also no longer that spin: it waits for the real refresh, so frames go up evenly and without tearing. See
+    // 'waitForLockedPresent' in 'VideoBackend_SDL.cpp'.
+    menu_frame_rate,
+
+    // A television's brightness control, inside the game. See 'PlayerPrefs::gBrightness'.
+    menu_brightness,
 #endif
 #if PSYDOOM_VULKAN_RENDERER
     menu_renderer,
@@ -83,13 +91,48 @@ static bool XOptions_IsRowVisible(const MenuItem item) noexcept {
 }
 
 static void XOptions_BuildRows() noexcept {
-    static constexpr int16_t FIRST_ROW_Y  = 50;
-    static constexpr int16_t ROW_SPACING  = 23;
-    static constexpr int16_t SLIDER_EXTRA = 15;     // The turn speed row carries a slider under its label
-    static constexpr int16_t EXIT_Y       = 205;    // Where 'Back' has always been, and where it stays
+    static constexpr int16_t FIRST_ROW_Y        = 50;
+    static constexpr int16_t FIRST_ROW_Y_TIGHT  = 44;     // Closer under the title, when every pixel is wanted
+    static constexpr int16_t ROW_SPACING        = 23;
+    static constexpr int16_t ROW_SPACING_MIN    = 18;     // Sixteen pixel letters and a little air between them
+    static constexpr int16_t SLIDER_EXTRA       = 15;     // The turn speed row carries a slider under its label
+    static constexpr int16_t EXIT_Y             = 205;    // Where 'Back' has always been, and where it stays
+    static constexpr int16_t LAST_ROW_MAX_Y     = EXIT_Y - 20;
+
+    // Spaced to fit.
+    //
+    // Two more rows - the frame rate and the brightness - make eight in a multiplayer game, and at the usual spacing the
+    // last of them would land on top of 'Back'. So the rows close up as far as they need to and no further: single
+    // player keeps the spacing it has always had.
+    int32_t numSettings = 0;
+    bool bHasSlider = false;
+
+    for (int32_t i = 0; i < num_menu_items; ++i) {
+        const MenuItem item = (MenuItem) i;
+
+        if ((item != menu_exit) && XOptions_IsRowVisible(item)) {
+            numSettings++;
+            bHasSlider |= (item == menu_turn_speed);
+        }
+    }
+
+    int16_t firstRowY = FIRST_ROW_Y;
+    int16_t rowSpacing = ROW_SPACING;
+
+    if (numSettings > 1) {
+        const int32_t sliderExtra = (bHasSlider) ? SLIDER_EXTRA : 0;
+        int32_t fit = (LAST_ROW_MAX_Y - firstRowY - sliderExtra) / (numSettings - 1);
+
+        if (fit < ROW_SPACING) {
+            firstRowY = FIRST_ROW_Y_TIGHT;
+            fit = (LAST_ROW_MAX_Y - firstRowY - sliderExtra) / (numSettings - 1);
+        }
+
+        rowSpacing = (int16_t) std::clamp(fit, (int32_t) ROW_SPACING_MIN, (int32_t) ROW_SPACING);
+    }
 
     gNumVisibleRows = 0;
-    int16_t y = FIRST_ROW_Y;
+    int16_t y = firstRowY;
 
     for (int32_t i = 0; i < num_menu_items; ++i) {
         const MenuItem item = (MenuItem) i;
@@ -116,7 +159,7 @@ static void XOptions_BuildRows() noexcept {
         gVisibleRows[gNumVisibleRows] = item;
         gVisibleRowY[gNumVisibleRows] = y;
         gNumVisibleRows++;
-        y = (int16_t)(y + ROW_SPACING);
+        y = (int16_t)(y + rowSpacing);
     }
 }
 
@@ -379,6 +422,37 @@ gameaction_t XOptions_Update() noexcept {
                 }
             }
         }   break;
+
+        // Uncapped, or locked to the television. Either direction toggles: there are only the two.
+        case menu_frame_rate: {
+            const bool bLeftEdge = (bMenuLeft && (!oldInputs.fMenuLeft()));
+            const bool bRightEdge = (bMenuRight && (!oldInputs.fMenuRight()));
+
+            if (bLeftEdge || bRightEdge) {
+                PlayerPrefs::gbUncapFramerate = (!PlayerPrefs::gbUncapFramerate);
+                PlayerPrefs::save();    // As it changes, not on the way out - see the note on the colour row
+                S_StartSound(nullptr, sfx_swtchx);
+            }
+        }   break;
+
+        // Brightness, a step per press. Applied on the very next frame, so the change can be judged while choosing it.
+        case menu_brightness: {
+            const bool bLeftEdge = (bMenuLeft && (!oldInputs.fMenuLeft()));
+            const bool bRightEdge = (bMenuRight && (!oldInputs.fMenuRight()));
+            const int32_t oldLevel = PlayerPrefs::gBrightness;
+
+            if (bLeftEdge) {
+                PlayerPrefs::gBrightness = std::max(PlayerPrefs::gBrightness - 1, PlayerPrefs::BRIGHTNESS_MIN);
+            }
+            else if (bRightEdge) {
+                PlayerPrefs::gBrightness = std::min(PlayerPrefs::gBrightness + 1, PlayerPrefs::BRIGHTNESS_MAX);
+            }
+
+            if (PlayerPrefs::gBrightness != oldLevel) {
+                PlayerPrefs::save();
+                S_StartSound(nullptr, sfx_stnmov);
+            }
+        }   break;
     #endif
 
     #if !defined(__XBOX__)
@@ -534,6 +608,31 @@ void XOptions_Draw() noexcept {
                         std::snprintf(label, sizeof(label), "SSG Style %s", SsgStyle::displayName(shown));
                     } else {
                         std::snprintf(label, sizeof(label), "SSG Style Only %s", SsgStyle::displayName(shown));
+                    }
+
+                    I_DrawString(62, rowY, label);
+                }   break;
+
+                case menu_frame_rate: {
+                    char label[32];
+
+                    if (PlayerPrefs::gbUncapFramerate) {
+                        std::snprintf(label, sizeof(label), "Uncapped FPS");
+                    } else {
+                        std::snprintf(label, sizeof(label), "%d FPS Lock", (int) Video::xbLockedFps());
+                    }
+
+                    I_DrawString(62, rowY, label);
+                }   break;
+
+                case menu_brightness: {
+                    // Zero is the PlayStation's own picture, and says so
+                    char label[32];
+
+                    if (PlayerPrefs::gBrightness <= PlayerPrefs::BRIGHTNESS_MIN) {
+                        std::snprintf(label, sizeof(label), "Brightness PS1");
+                    } else {
+                        std::snprintf(label, sizeof(label), "Brightness %d", (int) PlayerPrefs::gBrightness);
                     }
 
                     I_DrawString(62, rowY, label);

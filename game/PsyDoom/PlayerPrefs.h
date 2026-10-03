@@ -50,6 +50,20 @@ extern Password             gLastPassword_GecMe;
 
     // Which colour each player is drawn in: a 'PlayerColour::Colour'. Not portable - see 'PlayerColour.h'.
     extern int32_t          gPlayerColour[Controls::MAX_LOCAL_PLAYERS];
+
+    // How much to lift the picture's darker tones, from 0 (exactly what the PlayStation drew) upward.
+    //
+    // The picture this port puts out is the PlayStation's own pixel for pixel, so this is not making up for a fault in the
+    // drawing - it is a television's brightness control, inside the game. A PlayStation and an Xbox on the same set
+    // rarely look the same: the video encoders differ, and so do the inputs and cables, and the dark rooms of PSX Doom are
+    // where any difference in black level shows. One setting for the whole screen, since two players share one set.
+    constexpr int32_t       BRIGHTNESS_MIN = 0;
+    constexpr int32_t       BRIGHTNESS_MAX = 8;
+    extern int32_t          gBrightness;
+
+    // A second Final Doom password slot, for Doom Forever. It plays as Final Doom, so it used to share that game's slot -
+    // and its saves - and the two overwrote each other.
+    extern Password         gLastPassword_Forever;
 #endif
 
 void setToDefaults() noexcept;

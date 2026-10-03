@@ -18,6 +18,8 @@
 #include <lwip/inet.h>
 #include <nxdk/net.h>
 
+#include "XboxPaths.h"
+
 namespace XboxLog {
 
 //------------------------------------------------------------------------------------------------------------------------------------------
@@ -25,7 +27,7 @@ namespace XboxLog {
 //
 // Nothing is built in. The relay is a development tool: it sends a running commentary of what the console is doing to a
 // listener on another machine, and it only does anything at all if you tell it where to send by creating
-// 'E:\Apps\PsyDoomX\logserver.txt' with a single line of 'address:port' in it, for example:
+// 'logserver.txt' beside the executable with a single line of 'address:port' in it, for example:
 //
 //     192.168.0.5:9909
 //
@@ -34,7 +36,11 @@ namespace XboxLog {
 // a console quietly talking to a machine that is not theirs is not a diagnostic, it is a surprise.
 //------------------------------------------------------------------------------------------------------------------------------------------
 static constexpr uint16_t       DEFAULT_SERVER_PORT = 9909;
-static constexpr const char*    CONFIG_PATH         = "E:\\Apps\\PsyDoomX\\logserver.txt";
+
+static const char* configPath() noexcept {
+    static char path[260];
+    return XboxPaths::make(path, sizeof(path), "logserver.txt");
+}
 
 //------------------------------------------------------------------------------------------------------------------------------------------
 // The ring.
@@ -170,7 +176,7 @@ static bool readServerConfig(char* const ipOut, const size_t ipOutSize, uint16_t
     ipOut[0] = 0;
     portOut = DEFAULT_SERVER_PORT;
 
-    std::FILE* const pFile = std::fopen(CONFIG_PATH, "r");
+    std::FILE* const pFile = std::fopen(configPath(), "r");
 
     if (!pFile)
         return false;

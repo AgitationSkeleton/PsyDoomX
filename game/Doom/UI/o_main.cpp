@@ -257,6 +257,19 @@ gameaction_t O_Control() noexcept {
         if (!gbPlayerInGame[playerIdx])
             continue;
 
+        // Xbox splitscreen: only the player this call is for.
+        //
+        // 'O_ControlSplit' calls this once per player, setting 'gCurPlayerIndex' to that player each time - but this
+        // loop went on to handle every player regardless. So while player two was in Extra Options, player one's call
+        // here was still moving player two's cursor as if they were on this menu: wrapping it at this menu's five rows
+        // (which is why they could get no further than 'Color'), resetting their repeat delay so Extra Options never got
+        // a move of its own, and playing no sound because the sound below is only for 'gCurPlayerIndex'. It also read
+        // this menu's table with a cursor from the other menu, which can be past the end of it.
+        #if defined(__XBOX__)
+            if (Splitscreen::isActive() && (playerIdx != gCurPlayerIndex))
+                continue;
+        #endif
+
         // Exit the menu if start or select is pressed.
         // Note: checking for buttons newly pressed (as opposed to just pressed) here is a change incorporated from Final Doom.
         // It's required due to some changes made in other UIs like the password screen.

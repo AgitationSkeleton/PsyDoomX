@@ -11,6 +11,7 @@
 #include "Utils.h"
 #if defined(__XBOX__)
     #include "XboxDiag.h"
+    #include "XboxPaths.h"
 #endif
 #include "VideoBackend_SDL.h"
 #if PSYDOOM_VULKAN_RENDERER
@@ -27,8 +28,11 @@
     #include <windows.h>
     #include <cstring>
     static void videoStep(const char* msg) noexcept {
-        debugPrint("[VIDEO] %s\n", msg);
-        HANDLE h = CreateFileA("E:\\Apps\\PsyDoomX\\bootlog.txt",
+        // Not once the game's picture is up - see 'XboxDiag::gbGameOwnsScreen'
+        if (!XboxDiag::gbGameOwnsScreen) {
+            debugPrint("[VIDEO] %s\n", msg);
+        }
+        HANDLE h = CreateFileA(XboxPaths::bootLogPath(),
             FILE_APPEND_DATA, FILE_SHARE_READ, nullptr,
             OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (h != INVALID_HANDLE_VALUE) {

@@ -50,7 +50,13 @@ static uint32_t GetRealLineLength(const char* const pCharsBeg, const char* const
 // Returns the index of which glyph in the big font the specified character should use.
 // Returns '-1' if the character does not exist in the big font.
 //------------------------------------------------------------------------------------------------------------------------------------------
-static int32_t GetBigFontCharIndex(const char c) noexcept {
+static int32_t GetBigFontCharIndex(const char charIn) noexcept {
+    #if defined(__XBOX__)
+        const char c = I_BigFontChar(charIn);   // Doom Forever: see the note on 'I_BigFontChar'
+    #else
+        const char c = charIn;
+    #endif
+
     if ((c >= 'A') && (c <= 'Z'))
         return (int32_t)(BIG_FONT_UCASE_ALPHA + (c - 'A'));
     

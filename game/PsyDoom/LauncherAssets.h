@@ -34,12 +34,25 @@ static constexpr MenuArt MENU_ART_DOOM       = { "BACK",   0  };    // MAINPAL
 static constexpr MenuArt MENU_ART_FINAL_DOOM = { "BACK",   17 };    // TITLEPAL
 static constexpr MenuArt MENU_ART_MASTER     = { "COVERG", 28 };    // From PSXGMINF.TXT on the disc
 
-// Open a disc, decode what the menu needs from it, and take a copy of its super shotgun sprites.
+// Doom Forever's own 'BACK' through its own TITLEPAL, the palette the game itself draws its menus with since it plays as
+// Final Doom. Both are redrawn rather than Final Doom's: the picture is a dark blue stonework, not the warped skulls. It
+// was decoded off the disc through every palette to be sure - this is the only one that gives a picture rather than noise.
+static constexpr MenuArt MENU_ART_FOREVER    = { "BACK",   17 };
+
+// Open a disc, decode what the menu needs from it, and take a copy of its super shotgun and marine sprites.
 //
-// 'ssgStyle' says which edition this disc is, so its sprites are written out under a name of their own for the other
-// editions to borrow. See 'SsgStyle.h' for what that is for and why the launcher is the only thing that can do it -
-// the games only ever see one disc each, and this is the one place all three are readable at once.
-bool probeDisc(const char* const cuePath, const MenuArt& menuArt, const int32_t ssgStyle) noexcept;
+// 'ssgStyle' says which edition's shotgun this disc carries, so its sprites are written out under a name of their own for
+// the other editions to borrow - or -1 for none. See 'SsgStyle.h' for what that is for and why the launcher is the only
+// thing that can do it: the games only ever see one disc each, and this is the one place all of them are readable.
+//
+// 'playerColourEdition' says which recoloured marine file to write from this disc - a 'PlayerColour::EDITION_' value, or
+// -1 for none.
+bool probeDisc(
+    const char* const cuePath,
+    const MenuArt& menuArt,
+    const int32_t ssgStyle,
+    const int32_t playerColourEdition
+) noexcept;
 
 // Draw the loaded style's background, scaled to fill the screen.
 //
@@ -55,7 +68,12 @@ bool drawCachedBackground(const char* const cuePath) noexcept;
 void restoreBackgroundRect(const int32_t x, const int32_t y, const int32_t w, const int32_t h) noexcept;
 
 // Load an edition's cached menu assets, ready for drawing. Call once when the style changes.
-bool useStyle(const char* const cuePath) noexcept;
+//
+// 'bLatinLowerCaseOnly' is for Doom Forever. It is a Russian translation, and its font has Cyrillic letters drawn into the
+// slots for capitals - which is how the Russian game spells its menus - so English drawn with it comes out as nonsense.
+// Its lower case slots kept their Latin letters, which PSX Doom draws as small capitals, so everything is drawn with
+// those instead. It still reads as that game's own lettering.
+bool useStyle(const char* const cuePath, const bool bLatinLowerCaseOnly = false) noexcept;
 
 // Which CD track that disc's main menu music is on, as 'probeDisc' found it. Zero means "do not play anything".
 //

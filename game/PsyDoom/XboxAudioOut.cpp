@@ -5,6 +5,7 @@
 #include "PsxVm.h"
 #include "XboxDiag.h"
 #include "XboxLog.h"
+#include "XboxPaths.h"
 
 #include <atomic>
 #include <cstring>
@@ -78,10 +79,13 @@ static float gSpuChunk[SPU_CHUNK_FRAMES * 2];
 // last line in the log names the call that did not return.
 //------------------------------------------------------------------------------------------------------------------------------------------
 static void audioStep(const char* const msg) noexcept {
-    debugPrint("[XAUDIO] %s\n", msg);
+    // Not once the game's picture is up - see 'XboxDiag::gbGameOwnsScreen'
+    if (!XboxDiag::gbGameOwnsScreen) {
+        debugPrint("[XAUDIO] %s\n", msg);
+    }
 
     const HANDLE h = CreateFileA(
-        "E:\\Apps\\PsyDoomX\\bootlog.txt",
+        XboxPaths::bootLogPath(),
         FILE_APPEND_DATA,
         FILE_SHARE_READ,
         nullptr,

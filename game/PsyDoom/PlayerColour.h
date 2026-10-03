@@ -63,6 +63,13 @@ int32_t     rampStart(const Colour colour) noexcept;
 const char* displayName(const Colour colour) noexcept;
 const char* spriteName(const Colour colour) noexcept;    // Four characters: 'PLAY' for green, 'PLYI'/'PLYB'/'PLYR' otherwise
 
+// Which disc a set of recoloured sprites was made from. Doom, Final Doom and the Master Edition are their super shotgun
+// style's number as well, which is how the launcher has always passed them; Doom Forever has no style of its own.
+static constexpr int32_t EDITION_DOOM    = 0;
+static constexpr int32_t EDITION_FINAL   = 1;
+static constexpr int32_t EDITION_MASTER  = 2;
+static constexpr int32_t EDITION_FOREVER = 3;
+
 // Where the launcher leaves the recoloured sprites for a given edition, and for the running game
 const char* wadPathForEdition(const int32_t editionIdx) noexcept;
 

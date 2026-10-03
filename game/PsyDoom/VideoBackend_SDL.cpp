@@ -80,6 +80,208 @@ static uint64_t gXbPrescaleMicros = 0;          // 256x240 16-bit -> 512x480 32-
 static uint32_t gXbFrameNum = 0;
 #include <cstdint>
 #include <cstring>
+
+#include "Game.h"
+#include "PlayerPrefs.h"
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Brightness: lifting the darker tones on the way to the screen.
+//
+// The picture reaching the framebuffer is the PlayStation's own, pixel for pixel - the emulated GPU's colour arithmetic and
+// the renderer's lighting are both upstream's unchanged, and Doom never asked the PlayStation to dither - so a report of
+// dark rooms being far darker than on a PlayStation is not the drawing. It is everything after it: two consoles with
+// different video encoders on different inputs of a television, where the black level of PSX Doom's dim rooms is exactly
+// what a difference shows up in. So this is a brightness control, as a television has, and at zero it does nothing.
+//
+// A gamma curve on each five bit channel, held as three 32 entry tables that already hold each channel in its place in the
+// Xbox's pixel. That makes the conversion three small lookups where it was three shifts and masks, from tables small enough
+// to stay in the first level cache, so a brighter picture costs no measurable time. Black stays black - only the steps above
+// it are spread out - and no level ever comes out darker than it went in.
+//
+// GAMECUBE: the curve carries; the tables would hold YUV contributions instead.
+//------------------------------------------------------------------------------------------------------------------------------------------
+static uint16_t gXbBrightR[32];     // Red, shifted into place for A1R5G5B5
+static uint16_t gXbBrightG[32];     // Green, likewise
+static uint16_t gXbBrightB[32];     // Blue, likewise
+static uint8_t  gXbBright5[32];     // The same curve as plain five bit values, for the 32-bit path
+static int32_t  gXbBrightLevel = -1;
+
+static void updateBrightnessTables() noexcept {
+    const int32_t level = std::clamp(PlayerPrefs::gBrightness, PlayerPrefs::BRIGHTNESS_MIN, PlayerPrefs::BRIGHTNESS_MAX);
+
+    if (level == gXbBrightLevel)
+        return;
+
+    gXbBrightLevel = level;
+    const double gamma = 1.0 + 0.1 * (double) level;
+
+    for (int32_t v = 0; v < 32; ++v) {
+        int32_t out = v;
+
+        if ((level > 0) && (v > 0)) {
+            out = (int32_t)(31.0 * std::pow((double) v / 31.0, 1.0 / gamma) + 0.5);
+            out = std::clamp(out, v, 31);
+        }
+
+        gXbBright5[v] = (uint8_t) out;
+        gXbBrightR[v] = (uint16_t)(out << 10);
+        gXbBrightG[v] = (uint16_t)(out << 5);
+        gXbBrightB[v] = (uint16_t) out;
+    }
+
+    XBOX_LOGI(
+        Video, "brightness %d (gamma %d.%02d): level 1 shows as %d, 2 as %d, 4 as %d, 8 as %d, 16 as %d (of 31)",
+        (int) level, (int) gamma, (int)((gamma - (int) gamma) * 100.0 + 0.5),
+        (int) gXbBright5[1], (int) gXbBright5[2], (int) gXbBright5[4], (int) gXbBright5[8], (int) gXbBright5[16]
+    );
+}
+
+// One PlayStation pixel to one Xbox pixel, through the brightness tables
+static inline uint16_t psxToXboxPixel(const uint16_t srcBits) noexcept {
+    return (uint16_t)(
+        0x8000u |
+        gXbBrightR[srcBits & 0x1Fu] |
+        gXbBrightG[(srcBits >> 5) & 0x1Fu] |
+        gXbBrightB[(srcBits >> 10) & 0x1Fu]
+    );
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// The frame rate lock: every frame goes on screen at the start of a refresh, and the same number of refreshes apart.
+//
+// Uncapped, the game presents whenever a frame is finished, which on this console is anywhere from 20 to 48 times a second
+// and at no particular point in the television's refresh. Smooth on average, uneven from one frame to the next, and torn
+// wherever the beam happened to be. Locked, each frame waits for a refresh and frames are held to two refreshes each - 30
+// a second at 60Hz. A frame that runs long holds for three instead, rather than appearing part way through one.
+//
+// There is a second gain. This console has one framebuffer and no back buffer, so the present writes into the picture the
+// television is reading. Started at the top of a refresh, the present - about 10ms for a full frame - finishes ahead of
+// the beam's 16.7ms trip down the screen, so the beam never overtakes it and there is nothing to tear.
+//
+// How many refreshes a frame lasts depends on the game's own timing as well as the television's: a frame has to cover at
+// least two of the game's vblanks, as the PlayStation's own frame cap did. A PAL disc on a 60Hz console needs three of the
+// television's to cover two of its own. That count, and how many of the game's vblanks really went by, are worked out
+// here and handed to 'I_DrawPresent', which used to count them off a clock of its own.
+//------------------------------------------------------------------------------------------------------------------------------------------
+static uint64_t gXbLockLastPresentTicks = 0;        // Performance counter just after the refresh the last frame went up on
+static double   gXbLockRefreshTicks = 0.0;          // How long one refresh lasts, measured as it goes
+static double   gXbLockCarry = 0.0;                 // Part of a game vblank carried between frames when the rates differ
+static int32_t  gXbLockElapsedVBlanks = -1;         // Game vblanks covered by the frame just presented, or -1 for none
+static uint32_t gXbLockFrames = 0;
+static uint32_t gXbLockOnTime = 0;                  // Frames that took the refreshes they were meant to
+static uint32_t gXbLockLate = 0;                    // Frames that ran into one more
+static uint32_t gXbLockVeryLate = 0;                // Frames that ran into more than that
+static uint64_t gXbLockLastReportTicks = 0;
+
+static double displayRefreshHz() noexcept {
+    return (XVideoGetMode().refresh == 50) ? 50.0 : 59.94;
+}
+
+// How many refreshes each frame is held for, so that it covers two of the game's own vblanks
+static int32_t lockedRefreshesPerFrame() noexcept {
+    const double gameVBlankSecs = (Game::gSettings.bUsePalTimings) ? (1.0 / 50.0) : (1.0 / 60.0);
+    const double refreshSecs = 1.0 / displayRefreshHz();
+
+    for (int32_t refreshes = 2; refreshes < 4; ++refreshes) {
+        if ((double) refreshes * refreshSecs >= (2.0 * gameVBlankSecs) - 0.0005)
+            return refreshes;
+    }
+
+    return 4;
+}
+
+static void waitForLockedPresent() noexcept {
+    const uint64_t freq = SDL_GetPerformanceFrequency();
+
+    if ((freq == 0) || (!XVideoGetFB()))
+        return;
+
+    if (gXbLockRefreshTicks <= 0.0) {
+        gXbLockRefreshTicks = (double) freq / displayRefreshHz();
+    }
+
+    const int32_t refreshesPerFrame = lockedRefreshesPerFrame();
+    const uint64_t startTicks = SDL_GetPerformanceCounter();
+    const double sinceLast = (gXbLockLastPresentTicks != 0) ? (double)(startTicks - gXbLockLastPresentTicks) : 0.0;
+
+    // A long gap is a load or a pause rather than a frame running long: go up on the next refresh and start counting again
+    const bool bFreshStart = ((gXbLockLastPresentTicks == 0) || (sinceLast > gXbLockRefreshTicks * 8.0));
+
+    // Refreshes still to wait for. Those already gone by since the last frame count towards it.
+    int32_t waits = 1;
+
+    if (!bFreshStart) {
+        const int32_t refreshesGone = (int32_t)(sinceLast / gXbLockRefreshTicks);
+        waits = std::max(refreshesPerFrame - refreshesGone, 1);
+    }
+
+    uint64_t firstWakeTicks = 0;
+
+    for (int32_t i = 0; i < waits; ++i) {
+        XVideoWaitForVBlank();
+
+        if (i == 0) {
+            firstWakeTicks = SDL_GetPerformanceCounter();
+        }
+    }
+
+    const uint64_t presentTicks = SDL_GetPerformanceCounter();
+
+    // Two waits in a row are one refresh apart, which is the refresh rate measured rather than assumed
+    if (waits >= 2) {
+        const double measured = (double)(presentTicks - firstWakeTicks) / (double)(waits - 1);
+
+        if ((measured > (double) freq / 70.0) && (measured < (double) freq / 45.0)) {
+            gXbLockRefreshTicks = (gXbLockRefreshTicks * 0.9) + (measured * 0.1);
+        }
+    }
+
+    // How many of the game's vblanks this frame covers. Rounded, with what is left carried into the next frame, so the
+    // game's clock keeps to real time over a long run even when the two rates do not divide.
+    if (bFreshStart) {
+        gXbLockElapsedVBlanks = (gXbLockLastPresentTicks == 0) ? -1 : 4;    // After a gap: as much as the game allows
+        gXbLockCarry = 0.0;
+    } else {
+        const double gameVBlankSecs = (Game::gSettings.bUsePalTimings) ? (1.0 / 50.0) : (1.0 / 60.0);
+        const double exact = ((double)(presentTicks - gXbLockLastPresentTicks) / (double) freq) / gameVBlankSecs + gXbLockCarry;
+
+        int32_t vblanks = (int32_t)(exact + 0.5);
+        vblanks = std::clamp(vblanks, 2, 4);
+        gXbLockCarry = std::clamp(exact - (double) vblanks, -0.5, 0.5);
+        gXbLockElapsedVBlanks = vblanks;
+
+        const int32_t refreshesTaken = (int32_t)(((double)(presentTicks - gXbLockLastPresentTicks) / gXbLockRefreshTicks) + 0.5);
+
+        gXbLockFrames++;
+
+        if (refreshesTaken <= refreshesPerFrame) {
+            gXbLockOnTime++;
+        } else if (refreshesTaken == refreshesPerFrame + 1) {
+            gXbLockLate++;
+        } else {
+            gXbLockVeryLate++;
+        }
+    }
+
+    gXbLockLastPresentTicks = presentTicks;
+
+    // Once every few seconds: how well the lock is holding, and the refresh it measured
+    if ((gXbLockLastReportTicks == 0) || ((presentTicks - gXbLockLastReportTicks) >= freq * 5)) {
+        if (gXbLockLastReportTicks != 0) {
+            const double refreshMs = (gXbLockRefreshTicks * 1000.0) / (double) freq;
+
+            XBOX_LOGI(
+                Video, "fps lock: %u frames, %u on time (%d refreshes), %u one late, %u later - refresh %d.%03dms",
+                (unsigned) gXbLockFrames, (unsigned) gXbLockOnTime, (int) refreshesPerFrame,
+                (unsigned) gXbLockLate, (unsigned) gXbLockVeryLate,
+                (int) refreshMs, (int)((refreshMs - (int) refreshMs) * 1000.0)
+            );
+        }
+
+        gXbLockLastReportTicks = presentTicks;
+        gXbLockFrames = gXbLockOnTime = gXbLockLate = gXbLockVeryLate = 0;
+    }
+}
 #endif
 
 
@@ -163,15 +365,7 @@ static void presentVramRect(
             const int32_t numPairs = rowLen / 2;
 
             for (int32_t x = 0; x < numPairs; ++x) {
-                const uint16_t srcBits = pSrcRow[x].bits;
-
-                const uint32_t out = (uint32_t)(
-                    0x8000u |
-                    ((srcBits & 0x001Fu) << 10) |
-                    (srcBits & 0x03E0u) |
-                    ((srcBits >> 10) & 0x001Fu)
-                );
-
+                const uint32_t out = psxToXboxPixel(pSrcRow[x].bits);
                 pRowPairs[x] = out | (out << 16);
             }
         }
@@ -180,13 +374,9 @@ static void presentVramRect(
                 const uint16_t srcBits = pSrcRow[srcXFixed >> 16].bits;
                 srcXFixed += xStepFixed;
 
-                // PlayStation packs blue high and red low; the Xbox wants the opposite, with the top bit set opaque
-                rowBuf[x] = (uint16_t)(
-                    0x8000u |
-                    ((srcBits & 0x001Fu) << 10) |
-                    (srcBits & 0x03E0u) |
-                    ((srcBits >> 10) & 0x001Fu)
-                );
+                // PlayStation packs blue high and red low; the Xbox wants the opposite, with the top bit set opaque.
+                // The tables do the swap and the brightness together.
+                rowBuf[x] = psxToXboxPixel(srcBits);
             }
         }
 
@@ -201,6 +391,18 @@ static void presentVramRect(
 #endif
 
 BEGIN_NAMESPACE(Video)
+
+#if defined(__XBOX__)
+int32_t xbTakeLockedElapsedVBlanks() noexcept {
+    const int32_t vblanks = gXbLockElapsedVBlanks;
+    gXbLockElapsedVBlanks = -1;
+    return vblanks;
+}
+
+int32_t xbLockedFps() noexcept {
+    return (int32_t)((displayRefreshHz() / (double) lockedRefreshesPerFrame()) + 0.5);
+}
+#endif
 
 //------------------------------------------------------------------------------------------------------------------------------------------
 // Creates the backend with the SDL renderer uninitialized
@@ -547,6 +749,18 @@ void VideoBackend_SDL::presentSdlFramebufferTexture() noexcept {
     // The scale stays 2x with the image centred and black bars either side, exactly as before: 640 is not a whole
     // multiple of 256 and stretching to fill would distort the picture as well as costing more.
     //--------------------------------------------------------------------------------------------------------------
+    // The frame rate lock, when it is on: wait for the refresh this frame belongs on before writing any of it. Ahead of
+    // the timer below, so the wait is counted as pacing rather than as the present. See 'waitForLockedPresent'.
+    if (!PlayerPrefs::gbUncapFramerate) {
+        waitForLockedPresent();
+    } else {
+        gXbLockElapsedVBlanks = -1;
+        gXbLockLastPresentTicks = 0;    // So turning the lock back on starts afresh rather than from a stale frame
+    }
+
+    // The brightness setting can change at any time from the options menu, and this picks the change up on the next frame
+    updateBrightnessTables();
+
     const uint64_t xbDirectStart = XboxLog::nowMicros();
 
     const VIDEO_MODE videoMode = XVideoGetMode();
@@ -642,7 +856,12 @@ void VideoBackend_SDL::presentSdlFramebufferTexture() noexcept {
         // Clearing per frame was never needed: each viewport blit covers its own region completely, so nothing of the
         // previous frame survives inside them, and the bars around them are static black. One clear when splitscreen
         // starts, when the layout changes, and when it ends is enough.
-        if (Splitscreen::consumeScreenClearRequest()) {
+        // The first frame clears the whole screen, taking startup's progress lines with it - the picture never covers
+        // the bars either side, so those lines would otherwise stay there for good. See 'XboxDiag::gbGameOwnsScreen'.
+        const bool bFirstGameFrame = (!XboxDiag::gbGameOwnsScreen);
+        XboxDiag::gbGameOwnsScreen = true;
+
+        if (Splitscreen::consumeScreenClearRequest() || bFirstGameFrame) {
             std::memset(pDstBase, 0, (size_t) dstStride * (size_t) screenH * sizeof(uint16_t));
         }
 
@@ -779,9 +998,9 @@ void VideoBackend_SDL::presentSdlFramebufferTexture() noexcept {
 
             for (uint32_t x = 0; x < ORIG_DRAW_RES_X; ++x) {
                 const uint16_t srcBits = pSrc[x].bits;
-                const uint32_t r = (uint32_t)(srcBits & 0x1F) << 3;
-                const uint32_t g = (uint32_t)((srcBits >> 5) & 0x1F) << 3;
-                const uint32_t b = (uint32_t)((srcBits >> 10) & 0x1F) << 3;
+                const uint32_t r = (uint32_t) gXbBright5[srcBits & 0x1F] << 3;
+                const uint32_t g = (uint32_t) gXbBright5[(srcBits >> 5) & 0x1F] << 3;
+                const uint32_t b = (uint32_t) gXbBright5[(srcBits >> 10) & 0x1F] << 3;
                 const uint32_t px = (r << 16) | (g << 8) | b;
 
                 // Doubled horizontally with two plain stores, into cache rather than into the framebuffer.

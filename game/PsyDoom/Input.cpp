@@ -14,8 +14,10 @@
 #include <SDL.h>
 
 #if defined(__XBOX__)
+#include "Splitscreen.h"
 #include "XboxDiag.h"
 #include "XboxLog.h"
+#include "XboxPads.h"
 // Forward-declare nxdk USB polling function.
 extern "C" int usbh_pooling_hubs(void);
 #endif
@@ -222,15 +224,59 @@ static void rescanGameControllers() noexcept {
     // Note that we can check if a gamepad is connected by checking if the associated joystick is connected.
     if (gpJoystick) {
         if (!SDL_JoystickGetAttached(gpJoystick)) {
+            #if defined(__XBOX__)
+                XBOX_LOGI(Input, "input: player one's pad (instance %d) is gone", (int) gJoystickId);
+            #endif
+
             closeCurrentGameController();
         }
     }
+
+    #if defined(__XBOX__)
+        // Player two's, the same.
+        //
+        // Never checked before. A second pad unplugged and plugged back in stayed dead for the rest of the game: the slot
+        // still held the old one, and the search below only ever fills a slot that is empty.
+        if (gpGameController2 && (!SDL_GameControllerGetAttached(gpGameController2))) {
+            XBOX_LOGI(Input, "input: player two's pad (instance %d) is gone", (int) gJoystickId2);
+            SDL_GameControllerClose(gpGameController2);
+            gpGameController2 = nullptr;
+            gJoystickId2 = -1;
+            std::memset(gGamepadInputsP2, 0, sizeof(gGamepadInputsP2));
+            std::memset(gGamepadInputsP2Old, 0, sizeof(gGamepadInputsP2Old));
+        }
+
+        // Player one without a pad and player two with one, outside splitscreen: the second pad is the only one there
+        // is, so it is player one's now. Single player only ever reads player one, and a game that ignores the pad in
+        // the player's hands looks exactly like the pad has died. In splitscreen it stays player two's.
+        if ((!gpJoystick) && gpGameController2 && (!Splitscreen::isActive())) {
+            XBOX_LOGI(Input, "input: player one's pad is gone - player two's (instance %d) takes over", (int) gJoystickId2);
+            gpGameController = gpGameController2;
+            gpJoystick = SDL_GameControllerGetJoystick(gpGameController);
+            gJoystickId = gJoystickId2;
+            gpGameController2 = nullptr;
+            gJoystickId2 = -1;
+            std::memset(gGamepadInputsP2, 0, sizeof(gGamepadInputsP2));
+            std::memset(gGamepadInputsP2Old, 0, sizeof(gGamepadInputsP2Old));
+        }
+    #endif
 
     // See if there are any joysticks connected.
     // Note: a return of < 0 means an error, which we will ignore:
     const int numJoysticks = SDL_NumJoysticks();
 
     for (int joyIdx = 0; joyIdx < numJoysticks; ++joyIdx) {
+        #if defined(__XBOX__)
+            // A device one player already has is not offered to the other.
+            //
+            // SDL hands back the controller that is already open when asked to open one a second time, so without this
+            // both players could end up on the same pad - which is what happened when player one's was unplugged while
+            // a second was still in: the search reached player two's and gave it to player one as well.
+            const SDL_JoystickID deviceId = SDL_JoystickGetDeviceInstanceID(joyIdx);
+
+            if ((gpJoystick && (deviceId == gJoystickId)) || (gpGameController2 && (deviceId == gJoystickId2)))
+                continue;
+        #endif
         // If we find a valid game controller or generic joystick then try to open it.
         // If we succeed then our work is done!
         if (SDL_IsGameController(joyIdx)) {
@@ -270,6 +316,30 @@ static void rescanGameControllers() noexcept {
             continue;
         }
     }
+
+    // Who has which pad now, whenever that changes
+    #if defined(__XBOX__)
+    {
+        static SDL_JoystickID sLoggedP1 = -2;
+        static SDL_JoystickID sLoggedP2 = -2;
+
+        const SDL_JoystickID p1 = (gpJoystick) ? gJoystickId : -1;
+        const SDL_JoystickID p2 = (gpGameController2) ? gJoystickId2 : -1;
+
+        if ((p1 != sLoggedP1) || (p2 != sLoggedP2)) {
+            sLoggedP1 = p1;
+            sLoggedP2 = p2;
+
+            XBOX_LOGI(
+                Input, "input: %d device(s) - player one instance %d (%s, '%s'), player two instance %d ('%s')",
+                numJoysticks,
+                (int) p1, (gpGameController) ? "game controller" : ((gpJoystick) ? "plain joystick" : "none"),
+                (gpGameController) ? SDL_GameControllerName(gpGameController) : "",
+                (int) p2, (gpGameController2) ? SDL_GameControllerName(gpGameController2) : ""
+            );
+        }
+    }
+    #endif
 }
 
 //------------------------------------------------------------------------------------------------------------------------------------------
@@ -665,6 +735,17 @@ static void handleSdlEvents() noexcept {
             case SDL_CONTROLLERDEVICEADDED:
             case SDL_CONTROLLERDEVICEREMOVED:
             case SDL_CONTROLLERDEVICEREMAPPED:
+                #if defined(__XBOX__)
+                    XBOX_LOGI(
+                        Input, "sdl: %s, device %d",
+                        (sdlEvent.type == SDL_JOYDEVICEADDED) ? "joystick added" :
+                        (sdlEvent.type == SDL_JOYDEVICEREMOVED) ? "joystick removed" :
+                        (sdlEvent.type == SDL_CONTROLLERDEVICEADDED) ? "controller added" :
+                        (sdlEvent.type == SDL_CONTROLLERDEVICEREMOVED) ? "controller removed" : "controller remapped",
+                        (int) sdlEvent.cdevice.which
+                    );
+                #endif
+
                 rescanGameControllers();
                 break;
         }
@@ -779,6 +860,31 @@ void update() noexcept {
         // to keep the USB stack alive and process hub events (connect/disconnect, IRQ re-arm).
         usbh_pooling_hubs();
         XboxDiag::tickUsb();  // diagnostic: count USB service calls
+
+        // Restart any pad read that an error stopped, and report what the pads are doing. On this thread, straight after
+        // the hub polling, because that is what can disconnect a pad. See 'XboxPads.h'.
+        XboxPads::service();
+
+        // Look for pads now and then as well as when SDL says one came or went.
+        //
+        // A pad that finishes enumerating late - third party ones are often slower - does raise an event, but a pad that
+        // goes unclaimed for any reason leaves a player with no controls and nothing on screen to say why. A second look
+        // costs a few calls a second.
+        {
+            static uint32_t sLastRescanMs = 0;
+            const uint32_t nowMs = SDL_GetTicks();
+
+            if ((nowMs - sLastRescanMs) >= 1000u) {
+                sLastRescanMs = nowMs;
+
+                const bool bP1Missing = (!gpJoystick) || (!SDL_JoystickGetAttached(gpJoystick));
+                const bool bP2Missing = (gpGameController2) ? (!SDL_GameControllerGetAttached(gpGameController2)) : (SDL_NumJoysticks() > 1);
+
+                if (bP1Missing || bP2Missing) {
+                    rescanGameControllers();
+                }
+            }
+        }
 #endif
 #if defined(__XBOX__)
         // Remember player two's pad as it was BEFORE this frame's events are read.

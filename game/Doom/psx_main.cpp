@@ -18,15 +18,20 @@
 #include "PsyDoom/Video.h"
 
 #if defined(__XBOX__)
+    #include "PsyDoom/XboxDiag.h"
     #include <hal/debug.h>
     #include <windows.h>
     #include <cstring>
+    #include "PsyDoom/XboxPaths.h"
     // Write to the nxdk debug screen AND a log file on E:
     static void xbStep(const char* msg) noexcept {
-        debugPrint("[PSX_MAIN] %s\n", msg);
+        // Not once the game's picture is up - see 'XboxDiag::gbGameOwnsScreen'
+        if (!XboxDiag::gbGameOwnsScreen) {
+            debugPrint("[PSX_MAIN] %s\n", msg);
+        }
         // Also write to bootlog file for post-mortem
         HANDLE h = CreateFileA(
-            "E:\\Apps\\PsyDoomX\\bootlog.txt",
+            XboxPaths::bootLogPath(),
             FILE_APPEND_DATA, FILE_SHARE_READ, nullptr,
             OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (h != INVALID_HANDLE_VALUE) {

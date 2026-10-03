@@ -47,6 +47,8 @@ Password            gLastPassword_GecMe;        // Password for the current leve
 #if defined(__XBOX__)
     int32_t         gSsgStyle[Controls::MAX_LOCAL_PLAYERS];         // Whose super shotgun each player carries - see 'SsgStyle.h'
     int32_t         gPlayerColour[Controls::MAX_LOCAL_PLAYERS];     // What colour each player is drawn in - see 'PlayerColour.h'
+    int32_t         gBrightness;                                    // How far to lift the darker tones - see the header
+    Password        gLastPassword_Forever;                          // Password for the current level the player is on: Doom Forever
 #endif
 
 // Internally kept settings
@@ -89,6 +91,11 @@ static Password* getPasswordForPrefsFieldName(const char* const fieldName) noexc
 
     if (std::strcmp(fieldName, "lastPassword_GecMe") == 0)
         return &gLastPassword_GecMe;
+
+#if defined(__XBOX__)
+    if (std::strcmp(fieldName, "lastPassword_DoomForever") == 0)
+        return &gLastPassword_Forever;
+#endif
 
     return nullptr;
 }
@@ -191,6 +198,9 @@ static void loadPrefsFileIniEntry(const IniUtils::IniEntry& entry) noexcept {
     else if (entry.key == "playerColour2") {
         gPlayerColour[1] = entry.value.tryGetAsInt(gPlayerColour[1]);
     }
+    else if (entry.key == "brightness") {
+        gBrightness = std::clamp(entry.value.tryGetAsInt(gBrightness), BRIGHTNESS_MIN, BRIGHTNESS_MAX);
+    }
     else if (entry.key == "ssgStyle2") {
         gSsgStyle[1] = entry.value.tryGetAsInt(gSsgStyle[1]);
     }
@@ -241,6 +251,10 @@ void setToDefaults() noexcept {
         gSsgStyle[i] = -1;
         gPlayerColour[i] = 0;   // PlayerColour::GREEN
     }
+
+    // The PlayStation's own picture until asked otherwise
+    gBrightness = BRIGHTNESS_MIN;
+    std::memset(&gLastPassword_Forever, 0, sizeof(gLastPassword_Forever));
 #endif
 }
 
@@ -305,6 +319,7 @@ void save() noexcept {
         PREF_LINE("lastPassword_Doom = %s\r\n", getPasswordCString(gLastPassword_Doom).chars);
         PREF_LINE("lastPassword_FinalDoom = %s\r\n", getPasswordCString(gLastPassword_FDoom).chars);
         PREF_LINE("lastPassword_GecMe = %s\r\n", getPasswordCString(gLastPassword_GecMe).chars);
+        PREF_LINE("lastPassword_DoomForever = %s\r\n", getPasswordCString(gLastPassword_Forever).chars);
         PREF_LINE("turnSpeedPercentMultiplier = %d\r\n", gTurnSpeedMult100[0]);
         PREF_LINE("turnSpeedPercentMultiplier2 = %d\r\n", gTurnSpeedMult100[1]);
         PREF_LINE("alwaysRun = %d\r\n", (int) gbAlwaysRun[0]);
@@ -317,6 +332,7 @@ void save() noexcept {
         PREF_LINE("ssgStyle2 = %d\r\n", (int) gSsgStyle[1]);
         PREF_LINE("playerColour = %d\r\n", (int) gPlayerColour[0]);
         PREF_LINE("playerColour2 = %d\r\n", (int) gPlayerColour[1]);
+        PREF_LINE("brightness = %d\r\n", (int) gBrightness);
 
         #undef PREF_LINE
     }

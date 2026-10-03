@@ -168,7 +168,8 @@ jobs:
           files: build-xbox/game/default.xbe
           generate_release_notes: true
           body: |
-            Put `default.xbe` in `E:\Apps\PsyDoomX\` on the console, alongside a folder for each game
-            you own - see the README for the layout.
+            Put `default.xbe` in a folder of its own anywhere on the console's hard disk - `E:\Apps\PsyDoomX\`,
+            `E:\Games\PsyDoomX\` and `F:\Homebrew\PsyDoomX\` all work - alongside a folder for each game you
+            own. See the README for the layout.
 
             No game data is included. You need your own disc images.

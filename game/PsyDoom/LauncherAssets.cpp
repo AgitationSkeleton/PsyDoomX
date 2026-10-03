@@ -9,6 +9,7 @@
 #include "PlayerColour.h"
 #include "SsgStyle.h"
 #include "WadUtils.h"
+#include "XboxPaths.h"
 
 #include "Doom/Base/i_misc.h"
 #include "Doom/UI/m_main.h"
@@ -94,18 +95,46 @@ static bool readLump(
     return true;
 }
 
+// The folder all of the launcher's decoded assets go in, beside the executable
+static const char* cacheRoot() noexcept {
+    static char path[260];
+    return XboxPaths::make(path, sizeof(path), "cache");
+}
+
 // Where a disc's decoded assets are kept.
 //
-// Named after the disc's own file name, so the three editions cannot overwrite each other's cache.
+// Named after the folder the disc is in rather than the disc's own file name. It used to be the file name, which kept
+// the first three editions apart only because their cue sheets happened to be named differently: Doom Forever's is
+// 'Doom.cue', the same as Doom's, and the two would have shared one cache and worn each other's menu. Each edition
+// lives in a folder of its own, so the folder is what tells them apart.
 static void cacheDirForCue(const char* const cuePath, char* const dirOut, const size_t dirOutSize) noexcept {
     const char* const pLastSlash = std::strrchr(cuePath, '\\');
-    const char* const pLeaf = (pLastSlash) ? (pLastSlash + 1) : cuePath;
-    std::snprintf(dirOut, dirOutSize, "E:\\Apps\\PsyDoomX\\cache\\%s", pLeaf);
+    const char* pFolder = cuePath;
+    size_t folderLen = 0;
+
+    if (pLastSlash) {
+        const char* pPrevSlash = pLastSlash;
+
+        while ((pPrevSlash > cuePath) && (pPrevSlash[-1] != '\\')) {
+            --pPrevSlash;
+        }
+
+        pFolder = pPrevSlash;
+        folderLen = (size_t)(pLastSlash - pPrevSlash);
+    }
+
+    // A cue sheet with no folder of its own (or one in a drive's root) falls back to its file name
+    if ((folderLen == 0) || (pFolder[folderLen - 1] == ':')) {
+        pFolder = (pLastSlash) ? (pLastSlash + 1) : cuePath;
+        folderLen = std::strlen(pFolder);
+    }
+
+    std::snprintf(dirOut, dirOutSize, "%s\\%.*s", cacheRoot(), (int) folderLen, pFolder);
 }
 
 // Write a decoded image beside the executable, so each disc is read once rather than on every boot
 static bool writeCache(const char* const cacheDir, const char* const name, const void* const pData, const int32_t size) noexcept {
-    CreateDirectoryA("E:\\Apps\\PsyDoomX\\cache", nullptr);
+    CreateDirectoryA(cacheRoot(), nullptr);
     CreateDirectoryA(cacheDir, nullptr);
 
     char path[260];
@@ -231,7 +260,7 @@ static bool writeSsgWad(
         }
     }
 
-    return writeCache("E:\\Apps\\PsyDoomX\\cache", fileName, file.data(), (int32_t) file.size());
+    return writeCache(cacheRoot(), fileName, file.data(), (int32_t) file.size());
 }
 
 //------------------------------------------------------------------------------------------------------------------------------------------
@@ -762,7 +791,33 @@ static void buildMasterSoundCache(DiscReader& discReader, const IsoFileSys& file
     );
 }
 
-bool probeDisc(const char* const cuePath, const MenuArt& menuArt, const int32_t ssgStyle) noexcept {
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Find one of the game's files on a disc, by its path below the game's own folder.
+//
+// Every disc keeps its game under 'PSXDOOM' except Doom Forever, which is laid out the same way under 'ZONE3D' and calls
+// its WAD 'ZONE3D.WAD' rather than 'PSXDOOM.WAD'. The engine copes by renaming that one file when it builds its table of
+// the disc (see 'cdmaptbl.cpp'); the launcher reads the disc's file system directly, so it has to know both names.
+//------------------------------------------------------------------------------------------------------------------------------------------
+static const IsoFileSysEntry* findGameFile(const IsoFileSys& fileSys, const char* const pathBelowGameFolder) noexcept {
+    char path[128];
+    std::snprintf(path, sizeof(path), "PSXDOOM/%s", pathBelowGameFolder);
+
+    if (const IsoFileSysEntry* const pEntry = fileSys.getEntry(path))
+        return pEntry;
+
+    if (std::strcmp(pathBelowGameFolder, "ABIN/PSXDOOM.WAD") == 0)
+        return fileSys.getEntry("ZONE3D/ABIN/ZONE3D.WAD");
+
+    std::snprintf(path, sizeof(path), "ZONE3D/%s", pathBelowGameFolder);
+    return fileSys.getEntry(path);
+}
+
+bool probeDisc(
+    const char* const cuePath,
+    const MenuArt& menuArt,
+    const int32_t ssgStyle,
+    const int32_t playerColourEdition
+) noexcept {
     if ((!cuePath) || (cuePath[0] == '\0'))
         return false;
 
@@ -795,10 +850,10 @@ bool probeDisc(const char* const cuePath, const MenuArt& menuArt, const int32_t 
     //
     // Cached alongside the artwork so that changing the menu style does not mean walking a disc's file system again.
     {
-        const IsoFileSysEntry* pMusicEntry = fileSys.getEntry("PSXDOOM/CDAUDIO/DMSELECT.RAW");
+        const IsoFileSysEntry* pMusicEntry = findGameFile(fileSys, "CDAUDIO/DMSELECT.RAW");
 
         if (!pMusicEntry) {
-            pMusicEntry = fileSys.getEntry("PSXDOOM/CDAUDIO/SAMPMAIN.RAW");     // What some demo discs call it
+            pMusicEntry = findGameFile(fileSys, "CDAUDIO/SAMPMAIN.RAW");     // What some demo discs call it
         }
 
         const int32_t musicTrack = (pMusicEntry) ? discInfo.getSectorTrack(pMusicEntry->startLba) : 0;
@@ -814,10 +869,10 @@ bool probeDisc(const char* const cuePath, const MenuArt& menuArt, const int32_t 
     }
 
     // The WAD everything the menu needs lives in
-    const IsoFileSysEntry* const pWadEntry = fileSys.getEntry("PSXDOOM/ABIN/PSXDOOM.WAD");
+    const IsoFileSysEntry* const pWadEntry = findGameFile(fileSys, "ABIN/PSXDOOM.WAD");
 
     if (!pWadEntry) {
-        assetLog("launcher assets: '%s' has no PSXDOOM.WAD where one is expected", cuePath);
+        assetLog("launcher assets: '%s' has no PSXDOOM.WAD (or ZONE3D.WAD) where one is expected", cuePath);
         return false;
     }
 
@@ -1113,21 +1168,25 @@ bool probeDisc(const char* const cuePath, const MenuArt& menuArt, const int32_t 
             if (ssgStyle == SsgStyle::STYLE_MASTER) {
                 buildMasterSoundCache(discReader, fileSys);
             }
+        }
 
-            // The recoloured marines, for telling players apart
-            if (!playOffsets.empty()) {
-                const bool bWrotePlayer = writePlayerColourWad(
-                    discReader,
-                    pWadEntry->startLba,
-                    PlayerColour::wadPathForEdition(ssgStyle),
-                    playNames, playOffsets, playUnpackedSizes, playRawSizes, bPlayCompressed
-                );
+        // The recoloured marines, for telling players apart.
+        //
+        // Separate from the super shotgun now. The two used to share one number because each disc had both; Doom
+        // Forever's shotgun is Final Doom's to the pixel, but its marine is drawn differently, so it needs a recoloured
+        // set of its own without offering a shotgun style of its own.
+        if ((playerColourEdition >= 0) && (!playOffsets.empty())) {
+            const bool bWrotePlayer = writePlayerColourWad(
+                discReader,
+                pWadEntry->startLba,
+                PlayerColour::wadPathForEdition(playerColourEdition),
+                playNames, playOffsets, playUnpackedSizes, playRawSizes, bPlayCompressed
+            );
 
-                assetLog(
-                    "launcher assets:   %d marine frames recoloured %d ways, written=%s",
-                    (int) playOffsets.size(), (int) PlayerColour::COLOUR_COUNT - 1, bWrotePlayer ? "yes" : "NO"
-                );
-            }
+            assetLog(
+                "launcher assets:   %d marine frames recoloured %d ways, written=%s",
+                (int) playOffsets.size(), (int) PlayerColour::COLOUR_COUNT - 1, bWrotePlayer ? "yes" : "NO"
+            );
         }
 
         // The background, decoded through the palette and cached.
@@ -1444,14 +1503,18 @@ static std::vector<uint16_t>    gStatusPixels;
 static int32_t                  gStatusW = 0;
 static int32_t                  gStatusH = 0;
 
+// Whether capitals are drawn with the lower case glyphs. See 'useStyle'.
+static bool gbFoldToLowerCase = false;
+
 bool isStyleLoaded() noexcept {
     return (!gStatusPixels.empty());
 }
 
-bool useStyle(const char* const cuePath) noexcept {
+bool useStyle(const char* const cuePath, const bool bLatinLowerCaseOnly) noexcept {
     gStatusPixels.clear();
     gStatusW = 0;
     gStatusH = 0;
+    gbFoldToLowerCase = bLatinLowerCaseOnly;
 
     // The background comes with the style rather than being fetched when it is drawn. Doing it here is what lets a
     // repaint be a copy, and what lets a small part of the screen be repainted on its own.
@@ -1537,7 +1600,10 @@ static void blitGlyph(const int32_t dstX, const int32_t dstY, const int32_t u, c
 }
 
 // Where a character sits in the big font, or -1 if it is not in it
-static int32_t bigFontIndex(const char c) noexcept {
+static int32_t bigFontIndex(const char charIn) noexcept {
+    const bool bFold = (gbFoldToLowerCase && (charIn >= 'A') && (charIn <= 'Z'));
+    const char c = (bFold) ? (char)(charIn - 'A' + 'a') : charIn;
+
     if ((c >= 'A') && (c <= 'Z')) return BIG_FONT_UCASE_ALPHA + (c - 'A');
     if ((c >= 'a') && (c <= 'z')) return BIG_FONT_LCASE_ALPHA + (c - 'a');
     if ((c >= '0') && (c <= '9')) return BIG_FONT_DIGITS + (c - '0');

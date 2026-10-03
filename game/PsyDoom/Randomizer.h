@@ -67,6 +67,11 @@ void reportSpriteBudget() noexcept;
 // what stops those two facts meeting. It runs on every level for the same reason.
 void grantStartingWeapon() noexcept;
 
+// The same for one player coming back mid level - a co-op respawn in Coop Rando, where the player otherwise returns to a
+// rolled level with a pistol. Call once that player has been spawned. Does nothing during level setup, which
+// 'grantStartingWeapon' covers, and nothing when the mode is off.
+void grantRespawnWeapon(const int32_t playerIdx) noexcept;
+
 // A readable name for a thing type, for the log. Never null.
 const char* nameOfType(const mobjtype_t type) noexcept;
 

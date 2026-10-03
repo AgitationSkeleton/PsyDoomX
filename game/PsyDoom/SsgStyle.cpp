@@ -6,6 +6,7 @@
 #include "Controls.h"
 #include "PlayerPrefs.h"
 #include "WadList.h"
+#include "XboxPaths.h"
 
 #include "Doom/Game/sprinfo.h"
 
@@ -25,10 +26,11 @@ static constexpr const char* NATIVE_SPRITE_NAME = "SHT2";
 static constexpr const char* kSpriteNames[STYLE_COUNT] = { "SSGD", "SSGF", "SSGM" };
 static constexpr const char* kDisplayNames[STYLE_COUNT] = { "Doom", "Final", "Master" };
 
-static constexpr const char* kWadPaths[STYLE_COUNT] = {
-    "E:\\Apps\\PsyDoomX\\cache\\ssgd.wad",
-    "E:\\Apps\\PsyDoomX\\cache\\ssgf.wad",
-    "E:\\Apps\\PsyDoomX\\cache\\ssgm.wad"
+// Beside the executable, wherever that is - see 'XboxPaths.h'
+static constexpr const char* kWadNames[STYLE_COUNT] = {
+    "cache\\ssgd.wad",
+    "cache\\ssgf.wad",
+    "cache\\ssgm.wad"
 };
 
 // The game's own frames, saved before anything is pointed anywhere else, so the native style is always reachable
@@ -44,7 +46,11 @@ const char* spriteName(const Style style) noexcept {
 }
 
 const char* wadPath(const Style style) noexcept {
-    return ((style >= 0) && (style < STYLE_COUNT)) ? kWadPaths[style] : "";
+    if ((style < 0) || (style >= STYLE_COUNT))
+        return "";
+
+    static char paths[STYLE_COUNT][260];
+    return XboxPaths::make(paths[style], sizeof(paths[style]), kWadNames[style]);
 }
 
 const char* displayName(const Style style) noexcept {
@@ -120,7 +126,7 @@ void addOverrideWads(WadList& wadList) noexcept {
         if ((Style) i == native)
             continue;
 
-        const char* const pPath = kWadPaths[i];
+        const char* const pPath = wadPath((Style) i);
 
         if (GetFileAttributesA(pPath) == INVALID_FILE_ATTRIBUTES)
             continue;

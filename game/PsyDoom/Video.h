@@ -50,4 +50,15 @@ void displayFramebuffer() noexcept;
 bool isUsingVulkanRenderPath() noexcept;
 IVideoBackend& getCurrentBackend() noexcept;
 
+#if defined(__XBOX__)
+    // With the frame rate locked: how many of the game's vblanks the frame just presented covers, worked out from the
+    // television's real refreshes. -1 when there is no answer - unlocked, or the first frame after a change. Taking it
+    // clears it, so a frame is only ever counted once. See 'waitForLockedPresent' in 'VideoBackend_SDL.cpp'.
+    int32_t xbTakeLockedElapsedVBlanks() noexcept;
+
+    // What the lock holds the frame rate to on this console and disc: 30 on a 60Hz television, 25 at 50Hz, and 20 for a
+    // PAL disc on a 60Hz set, which needs three refreshes to cover two of its own vblanks.
+    int32_t xbLockedFps() noexcept;
+#endif
+
 END_NAMESPACE(Video)

@@ -13,10 +13,16 @@ You bring your own game disc. Nothing from a retail game ships here.
   PlayStation game only ever had link cable multiplayer between two machines.
 - **A launcher** that finds whichever games are installed and starts them, wearing the menu of
   whichever one you pick - its background, its font, its music and its sounds, read out of the disc.
+- **Doom Forever**, the Russian fan conversion of Final Doom, alongside Doom, Final Doom and the
+  Master Edition. It is listed after the Master Edition and its menu can be worn by the launcher like
+  the others. Its saves and level password are kept apart from Final Doom's.
 - **A Randomizer mode**, listed after Singleplayer, Cooperative and Deathmatch. Every monster, item and
   pickup in the level is rolled for something else that fits where it stands, along with the sky and the
   music. It only ever places what the running game can actually draw, so nothing turns into a missing
   sprite.
+- **Coop Rando**, listed after the Randomizer: the same rolled levels, played cooperatively in
+  splitscreen. Each player is handed their own random weapon at the start of every level, and again on
+  respawning.
 - **Cross edition super shotgun sprites.** Doom's and Final Doom's are different art. Carry either, per
   player, and it changes in your hands.
 - **The Master Edition's monsters in the other games.** If you have it installed, the Randomizer can put
@@ -26,36 +32,49 @@ You bring your own game disc. Nothing from a retail game ships here.
   told apart. Per player, and it follows the body.
 - **Named levels**, optionally. The cooperative and deathmatch level select can read `MAP24: Hell
   Beneath` rather than `Level 24`, using each game's own map names.
+- **A 30 FPS lock** as an alternative to the uncapped frame rate, timed to the television's own refresh
+  so frames arrive evenly and without tearing.
+- **A brightness setting**, for televisions that show PSX Doom's dark rooms darker than a PlayStation does.
 - Per player turn speed, autorun and stat display, and an on screen frame rate readout.
 
 ## What you need
 
 - An original Xbox that can run unsigned software.
-- **Your own** copy of one or more of: PSX Doom, PSX Final Doom, or the [GEC] Master Edition, as a
-  `.cue` and its `.bin` files. These are not included and never will be.
+- **Your own** copy of one or more of: PSX Doom, PSX Final Doom, the [GEC] Master Edition, or Doom
+  Forever, as a `.cue` and its `.bin` files. These are not included and never will be.
 
 ## Installing
 
-Put the executable and your discs on the Xbox's hard disk like this:
+Put the executable and your discs in a folder of their own, anywhere on the Xbox's hard disk -
+`E:\Apps\PsyDoomX`, `E:\Games\PsyDoomX` and `F:\Homebrew\PsyDoomX` all work the same:
 
 ```
-E:\Apps\PsyDoomX\
+<your folder>\
     default.xbe
     Doom\Doom.cue                          + its .bin files
     FinalDoom\FinalDoom.cue                + its .bin files
     MasterEdition\PSXDOOM_BETA_4.cue       + its .bin file
+    DoomForever\Doom.cue                   + its .bin file
 ```
 
 Only the folders you actually have need to exist - the launcher lists what it finds and nothing else.
-Launch `default.xbe` from a dashboard.
+`Final Doom`, `Master Edition` and `Doom Forever`, with spaces, are accepted as folder names too. The cue
+sheet does not have to be called what is shown above: if that name is not there, the launcher takes
+whichever `.cue` file the folder holds. Launch `default.xbe` from a dashboard.
 
-The launcher writes its settings, a cached copy of each disc's menu artwork, and its logs into
-`E:\Apps\PsyDoomX\`. Deleting `E:\Apps\PsyDoomX\cache\` is harmless; it is rebuilt on the next start.
+Everything the launcher and the games write - settings, saves, a cached copy of each disc's menu artwork,
+and logs - goes in that same folder. Deleting `cache\` is harmless; it is rebuilt on the next start.
+
+**Upgrading from an earlier version:** copy the new `default.xbe` over the old one. Saves and settings in
+that folder carry on as they were. The cache is now kept under each game's folder name, so the old
+`cache\Doom.cue`, `cache\FinalDoom.cue` and `cache\PSXDOOM_BETA_4.cue` folders can be deleted. Earlier
+versions only ran from `E:\Apps\PsyDoomX`; a second copy kept there to make another location work is no
+longer needed.
 
 ## Controls
 
-Standard Duke pad or S controller. Two pads gives you splitscreen from the main menu's multiplayer
-option.
+Standard Duke pad or S controller, or a third party pad. With two pads, choosing Cooperative, Deathmatch
+or Coop Rando on the main menu starts a splitscreen game. Any connected pad can drive the launcher's menu.
 
 | | |
 |---|---|
@@ -67,11 +86,44 @@ option.
 | Back | Automap |
 | Start | Pause |
 
-Bindings, turn speed and autorun are under **Options → Extra Options**. Player colour and super
-shotgun style are there too, in a multiplayer game.
+Turn speed, autorun, the stat display, the super shotgun style, the frame rate and brightness are under
+**Options → Extra Options**. In a multiplayer game, player colour and the splitscreen layout are there too.
+In splitscreen each player has their own menu, driven by their own pad.
 
 The launcher itself has settings for the frame rate readout, the menu style, and whether levels are
 named or numbered. They are remembered between runs.
+
+### Picture and frame rate
+
+**Brightness** runs from `PS1`, which is exactly the picture the PlayStation draws, up to 8. It lifts the
+darker tones without greying out black, and changes as you press, so it can be set while looking at a
+dark room. If a dark scene is too dark on your television, this is the setting to raise.
+
+**Frame rate** is either `Uncapped FPS`, which draws as fast as the console can and smooths movement
+between frames, or `30 FPS Lock`, which holds every frame for two refreshes of the television. The lock is
+steadier; uncapped is faster on average but varies from moment to moment. On a 50Hz television the lock
+is 25 FPS.
+
+### Cheat codes
+
+The PlayStation cheat codes work, in single player. Pause the game with Start, then enter the buttons in
+order:
+
+| Cheat | Buttons |
+|---|---|
+| God mode | Down, Left trigger, X, Black, Right, White, Left, B |
+| All weapons, ammo and keys | A, Y, White, Up, Down, Right trigger, Left, Left |
+| All weapons and ammo, no keys | A, Y, White, Up, Down, Right trigger, Right, Right |
+| Level select | Right, Left, Right trigger, Black, Y, White, B, A |
+| X-ray vision | White, Right trigger, Left trigger, Black, Right, Y, A, Right |
+| Show the whole map | Y, Y, Left trigger, Right trigger, Left trigger, Right trigger, Black, X |
+| Show every thing on the map | Y, Y, Left trigger, Right trigger, Left trigger, Right trigger, Black, B |
+| No clipping | Up, Up, Up, Up, Up, Up, Up, Black |
+| Monsters ignore you | A, Up, A, Up, X, X, A, X |
+
+The PlayStation buttons they stand for are Square → X, Circle → B, Triangle → Y, Cross → A, L1 → White,
+R1 → Black, L2 → Left trigger and R2 → Right trigger. Level select lets you pick any map with left and
+right, the secret ones included, and A goes there.
 
 ## Building
 
@@ -96,14 +148,18 @@ Tagged releases are built the same way by GitHub Actions and the executable is a
 ## The diagnostic relay
 
 There is a development tool built in that sends a running commentary of what the console is doing to a
-listener on another machine. **It does nothing unless you ask it to.** Create a file at
-`E:\Apps\PsyDoomX\logserver.txt` containing one line:
+listener on another machine. **It does nothing unless you ask it to.** Create a file called
+`logserver.txt` in the same folder as `default.xbe`, containing one line:
 
 ```
 192.168.0.5:9909
 ```
 
 Without that file no socket is opened and nothing leaves the console. No address is compiled in.
+
+Controller problems are also written to `pads.log` in that folder, with no listener needed: each pad as it
+connects - its vendor and product ID and how it reports - and any USB errors it was recovered from. If a
+controller misbehaves, that file is the thing to attach to an issue.
 
 ## Not everything is here
 

@@ -541,6 +541,18 @@ elseif (PLATFORM_XBOX)
         "PsyDoom/PlayerColour.h"
         "PsyDoom/SsgStyle.cpp"
         "PsyDoom/SsgStyle.h"
+        "PsyDoom/XboxPads.cpp"
+        "PsyDoom/XboxPads.h"
+        "PsyDoom/XboxPaths.cpp"
+        "PsyDoom/XboxPaths.h"
+    )
+
+    # nxdk's USB headers, for the one file that looks after the pads.
+    #
+    # Given to that file alone rather than to the whole game: the headers have generic names - 'config.h', 'usb.h',
+    # 'hub.h' - which on a case-insensitive file system would stand in for the game's own 'Config.h' anywhere else.
+    set_source_files_properties("PsyDoom/XboxPads.cpp" PROPERTIES INCLUDE_DIRECTORIES
+        "$ENV{NXDK_DIR}/lib/usb/libusbohci/inc;$ENV{NXDK_DIR}/lib/usb/libusbohci_xbox"
     )
 else()
     # Linux or other platforms

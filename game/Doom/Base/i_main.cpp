@@ -46,6 +46,7 @@
 
 #if defined(__XBOX__)
     #include <SDL.h>
+    #include "PsyDoom/XboxPaths.h"
     #include <windows.h>
     #include <cstring>
     static bool gXbLogTruncated = false;
@@ -56,7 +57,7 @@
             createDisposition = CREATE_ALWAYS;
             gXbLogTruncated = true;
         }
-        HANDLE h = CreateFileA("E:\\Apps\\PsyDoomX\\bootlog.txt",
+        HANDLE h = CreateFileA(XboxPaths::bootLogPath(),
             FILE_APPEND_DATA, FILE_SHARE_READ, nullptr,
             createDisposition, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (h != INVALID_HANDLE_VALUE) {
@@ -776,6 +777,26 @@ void I_DrawPresent() noexcept {
         Utils::doPlatformUpdates();
         Utils::threadYield();
         #endif
+    #endif
+
+    // Xbox: the frame rate lock.
+    //
+    // The present has already waited for the television refresh this frame belongs on, and counted how many of the game's
+    // vblanks went by. The loop below would count them again off a clock that only approximates the refresh - and when
+    // the two disagree by a hair it spins for another vblank, which carries the next frame past its refresh and is exactly
+    // the unevenness the lock is there to remove. Demos keep their fixed 15 Hz pacing below, unaffected.
+    #if defined(__XBOX__)
+        if ((!PlayerPrefs::gbUncapFramerate) && (!Game::gSettings.bUseDemoTimings)) {
+            const int32_t lockedVBlanks = Video::xbTakeLockedElapsedVBlanks();
+
+            if (lockedVBlanks > 0) {
+                gTotalVBlanks = I_GetTotalVBlanks();
+                gElapsedVBlanks = std::min(lockedVBlanks, 4);
+                gLastTotalVBlanks = gTotalVBlanks;
+                gXbPaceMicros = XboxLog::nowMicros() - xbPaceStart;
+                return;
+            }
+        }
     #endif
 
     // How many vblanks there are in a demo tick

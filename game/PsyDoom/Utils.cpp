@@ -30,6 +30,7 @@
 #include <SDL.h>
 #include <thread>
 #if defined(__XBOX__)
+#include "XboxPaths.h"
 #include <hal/debug.h>
 #include <windows.h>
 #endif
@@ -100,9 +101,9 @@ std::string getOrCreateUserDataFolder() noexcept {
 #if defined(__XBOX__)
     // nxdk SDL2 has SDL_FILESYSTEM_DUMMY; SDL_GetPrefPath always returns NULL.
     // Use a fixed path on the Xbox HDD instead.
-    static constexpr const char* const kXboxDataDir = "E:\\Apps\\PsyDoomX\\";
-    CreateDirectoryA(kXboxDataDir, nullptr);  // no-op if already exists
-    return kXboxDataDir;
+    // Beside the executable, wherever that is - see 'XboxPaths.h'. It is the folder the executable is in, so it is
+    // always there and there is nothing to create.
+    return XboxPaths::dir();
 #else
     char* const pCfgFilePath = SDL_GetPrefPath(SAVE_FILE_ORG, SAVE_FILE_PRODUCT);
 
@@ -421,12 +422,11 @@ void checkForRendererToggleInput() noexcept {
 // Peforms the switch between framerate modes if it is pressed.
 //------------------------------------------------------------------------------------------------------------------------------------------
 void checkForUncappedFramerateToggleInput() noexcept {
-    // Xbox: not offered, by hotkey any more than by menu.
+    // Xbox: chosen in Extra Options rather than by hotkey.
     //
-    // Capping the frame rate here does not protect anything - the game does not reach the cap - and turning it on
-    // makes 'I_DrawPresent' spin until enough vblanks have passed, which pins the frame to 33.3ms and throws away
-    // every millisecond saved below that. It can only make things worse, so it is not reachable at all rather than
-    // hidden in one place and left bound to a button in another.
+    // The hotkey's default binding is a keyboard key, which a console does not have, and on this console the setting is
+    // not PsyDoom's 'original frame rate' but a lock to the television's refresh - see 'waitForLockedPresent' in
+    // 'VideoBackend_SDL.cpp'. One place to change it, where it is labelled with what it does.
     #if defined(__XBOX__)
         return;
     #endif
